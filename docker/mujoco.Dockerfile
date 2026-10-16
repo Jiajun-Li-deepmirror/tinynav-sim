@@ -57,10 +57,75 @@ RUN python3 -m pip install --no-cache-dir \
     && uv pip install --python /opt/mjsim/bin/python \
       --index-url https://mirrors.aliyun.com/pypi/simple/ \
       numpy==1.26.4 \
-      mujoco==3.14.0 onnxruntime opencv-python-headless wgpu==0.32.0 \
+      mujoco==3.14.0 opencv-python-headless wgpu==0.32.0 \
       viser==1.1.1 trimesh plyfile \
+      onnxruntime-gpu \
+      nvidia-cublas nvidia-cudnn-cu13 nvidia-cuda-runtime nvidia-cuda-nvrtc \
       https://files.pythonhosted.org/packages/76/95/b87b576f638b58d1a0104c27d7526cddf4f5fb0ec4a18743ea6f2f16c87c/gausscam-0.1.5-py3-none-any.whl \
+    && uv pip install --python /opt/mjsim/bin/python --no-deps \
+      --index-url https://mirrors.aliyun.com/pypi/simple/ \
+      nvidia-curand-cu12 \
     && rm -rf /root/.cache/uv
+
+# onnxruntime-gpu's CUDA EP (retinify stereo depth, sim/stereo.py) dlopens its
+# CUDA libs from these pip wheel dirs; ORT 1.31 is a CUDA 13 build but links
+# curand.so.10, hence the lone cu12 curand above. Registered with ldconfig so
+# no process needs an LD_LIBRARY_PATH export.
+RUN for d in /opt/mjsim/lib/python3.12/site-packages/nvidia/*/lib; do \
+      echo "$d" >> /etc/ld.so.conf.d/zz-ort-nvidia.conf; done \
+    && ldconfig
+
+# robot_emu DDS deps (docs/multi-robot-sim-testbench.md §6, mujoco/README
+# "dog" row): the emu wears the real robot's unitree-sdk2py face. TWO PINS
+# ARE LOAD-BEARING:
+# - the cyclonedds python binding must stay in the 0.10.x family. An 11.x
+#   wheel publishes type objects that the PILOT side's 0.10.2 binding
+#   segfaults on during discovery (same-
+#   container 11<->11 is fine, so it surfaces only at the pilot boundary).
+#   py3.12 has no prebuilt 0.10.x wheel, so build the binding from sdist
+#   against the jazzy libddsc C core (0.10.5, same family as the pilot's).
+# - unitree_sdk2py is NOT on PyPI: the exact pinned source (upstream
+#   unitree_sdk2_python @814556d, the same commit tinynav/pyproject.toml
+#   pins) is checked out at mujoco/robot_emu/vendor/unitree_sdk2py and
+#   pip-installed below. It stands in for a submodule (no-commit
+#   discipline keeps it out of .gitmodules; convert with
+#   `git submodule add` at commit time). Vendoring is for the exact-pin
+#   + pilot-parity guarantee, NOT the build network: github.com was
+#   verified reachable from this host (the earlier "build network may
+#   not reach GitHub" note is retired). Refresh: git -C that dir fetch origin && git checkout <sha>.
+#   NOTE: keep the empty unitree_sdk2py/as2/sport/__init__.py added in
+#   the vendored tree -- upstream 814556d ships as2/sport WITHOUT one,
+#   and setup.py find_packages() then silently omits the subpackage
+#   (import unitree_sdk2py.as2.sport.* fails in the image).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      cmake g++ python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/cyclone-home/lib /opt/cyclone-home/bin \
+    && ln -s /opt/ros/jazzy/include/CycloneDDS /opt/cyclone-home/include \
+    && ln -sf /opt/ros/jazzy/lib/x86_64-linux-gnu/libddsc.so* \
+         /opt/cyclone-home/lib/ \
+    && for f in /opt/ros/jazzy/lib/x86_64-linux-gnu/libiceoryx*.so*; do \
+         ln -sf "$f" /opt/cyclone-home/lib/; done \
+    && test -e /opt/cyclone-home/lib/libddsc.so \
+    && test -e /opt/cyclone-home/include \
+    && CYCLONEDDS_HOME=/opt/cyclone-home \
+       python3 -m pip install --no-cache-dir --no-build-isolation \
+         -i https://mirrors.aliyun.com/pypi/simple/ \
+         --no-binary cyclonedds "cyclonedds==0.10.2" \
+    && echo /opt/cyclone-home/lib > /etc/ld.so.conf.d/cyclone-home.conf \
+    && ldconfig \
+    && rm -rf /root/.cache/pip
+# cmake/g++/python3-dev are deliberately NOT purged after the sdist
+# build. An earlier revision of this layer ended with
+# `apt-get purge -y cmake g++ python3-dev && apt-get autoremove -y`,
+# which cascade-removed the entire ros-jazzy tree (purge also removes
+# installed packages that depend on the purged ones -- build-essential,
+# python3-colcon-* -- and autoremove then swept the orphaned ros
+# packages): /opt/ros vanished, the farm symlinks above dangled, and
+# every unitree_sdk2py import failed on the missing libddsc
+# incident). The two test -e guards above turn a repeat
+# into a loud build failure instead of a silently dangling farm.
+ENV CYCLONEDDS_HOME=/opt/cyclone-home
 
 # viser's web client hardcodes keyboard camera controls (arrows rotate,
 # KeyE elevates) with no upstream toggle (viser-project/viser#259 open) --
@@ -108,6 +173,11 @@ PYEOF
 ENV PATH=/opt/mjsim/bin:$PATH
 
 COPY mujoco /workspace/tinynav-sim/mujoco
+# unitree_sdk2py: pip-install the pinned source checkout (deps already
+# baked: cyclonedds 0.10.2 above; --no-deps/--no-build-isolation keep pip
+# off the network entirely).
+RUN python3 -m pip install --no-cache-dir --no-deps --no-build-isolation \
+      /workspace/tinynav-sim/mujoco/robot_emu/vendor/unitree_sdk2py
 # DDS: bake the single-host loopback-unicast Cyclone config (same file as
 # sim.Dockerfile; proven against VPN-TUN route hijacking -- without it
 # large image samples degrade to ~4 Hz for peers on the host network).
@@ -127,7 +197,7 @@ WORKDIR /workspace/tinynav-sim
 # needs /dev/dri passed through at `docker run` (run-mujoco-sim.sh does);
 # the GPU-heavy paths (wgpu splat, EGL depth) pick NVIDIA on their own.
 # (Historical note: the "container viewer freezes after one frame" case was
-# root-caused 2026-10-03 to hil.py never calling viewer.sync() -- NOT to
+# root-caused to hil.py never calling viewer.sync() -- NOT to
 # GLX/NVIDIA. The no-pins guidance above still holds.)
 ENV MUJOCO_GL=egl \
       __GL_SYNC_TO_VBLANK=0 \
@@ -146,7 +216,7 @@ ENV MUJOCO_GL=egl \
 # docs/plan-sim-image-split.md.
 # OPENBLAS/OMP pinned: numpy's bundled OpenBLAS spins its whole pool on
 # every per-tick BLAS call (the PIE tick does tiny ones at 200 Hz) —
-# unpinned the idle-ish sim burns 5+ cores on pool spin-wait (2026-10-04:
-# 10.5ms-cpu/tick -> 0.9ms pinned).
+# unpinned the idle-ish sim burns 5+ cores on pool spin-wait
+# (10.5ms-cpu/tick -> 0.9ms pinned).
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mjsim"]
 CMD ["hil"]

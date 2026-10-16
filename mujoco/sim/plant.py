@@ -133,9 +133,11 @@ DEPTH_CAMERA_NAME = "front_depth"
 class Scene:
     """One navigable world: mjcf (+ optional collision fragment), catch
     floor, splat ply (model/splat/), named spawns, and the policy the hil
-    single-policy host loads. Register a new scene = one dict entry."""
+    single-policy host loads. Register a new scene = one dict entry.
+    xml is None only for the procedural "flat" smoke terrain (built from
+    a string, no mjcf file)."""
 
-    xml: Path
+    xml: Path | None
     collision: Path | None
     catch_z: float
     ply: str
@@ -145,6 +147,20 @@ class Scene:
 
 
 SCENES: dict[str, Scene] = {
+    # flat smoke terrain: procedural ground plane + go2 (build_flat_model),
+    # no walls and no catch cliff -- the emu bench's long-run scene. The
+    # 20 m plane bounds the walk far before integrator drift matters.
+    # Policy = policy.onnx, the canonical smoke.py flat pairing (ladder
+    # step 2): the flat-omni expert also walks here but is kept on map2.
+    "flat": Scene(
+        xml=None,
+        collision=None,
+        catch_z=-1.0,
+        ply="",
+        spawns={"origin": ((0.0, 0.0, 0.32), 0.0)},
+        default_spawn="origin",
+        hil_policy="policy.onnx",
+    ),
     # map3 stairwell: 123 exact collision boxes (Blender rebuild), F1 slab
     # tops at z=0, catch floor 5 cm below.
     "map3": Scene(
@@ -391,6 +407,8 @@ def build_model(scene_name: str = "map3") -> tuple[mujoco.MjModel, Bindings]:
     global _ACTIVE
     sc = get_scene(scene_name)
     _ACTIVE = sc
+    if sc.xml is None:
+        return build_flat_model()
     scene = mujoco.MjSpec.from_file(
         str(_preprocess_scene(sc.xml, ASSETS / ".compose"))
     )

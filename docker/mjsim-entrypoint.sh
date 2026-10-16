@@ -6,6 +6,10 @@
 set -e
 FORM="${1:-hil}"
 shift || true
+# run-mujoco-sim.sh forwards the literal "--" separator (documented
+# dog-form invocation: `run-mujoco-sim.sh dog -- --profile as2`);
+# argparse would choke on it, so drop a leading one.
+[ "${1:-}" = "--" ] && shift
 ROOT=/workspace/tinynav-sim/mujoco
 cd "$ROOT"
 # rclpy lives in the ROS prefix (PYTHONPATH + AMENT_PREFIX_PATH), not on the
@@ -27,4 +31,6 @@ ENTRY="view.py"
 
 # --spawn comes from the scene registry default (plant.SCENES); pass
 # --spawn/--scene explicitly to override.
+# dog = the chassis emu (robot_emu face): argparse entry, no GPU selector.
+[ "$FORM" = "dog" ] && exec python -u dog.py "$@"
 exec python -u "$ENTRY" "$DEV" "$@"

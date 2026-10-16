@@ -46,3 +46,11 @@ mujoco/assets/policy/*.pt
 mujoco/viser_client/node_modules/
 mujoco/viser_client/dist/
 mujoco/viser_client/build/
+
+# machine-local archive of navcore-side tools (the AS2 peripherals doc,
+# now in the dm-tinynav skill, inventories it; lives on the device)
+tools/probes/tool_dir/
+
+# unitree_sdk2py pinned checkout (upstream @814556d), provisioned locally --
+# see docker/mujoco.Dockerfile's load-bearing-pins note; submodule material
+mujoco/robot_emu/vendor/

@@ -51,29 +51,38 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 # sha256 240f88a20cac49e0a406f482f0aaf3ef39acce07881e0e48d7b6e36cfdb09efd).
 # The pin matters: hil exercises the whole gausscam API at boot, so a bad
 # version fails the image loudly rather than at run time.
+#
+# The onnxruntime-gpu + CUDA wheels for the retinify stereo depth arm
+# (--depth stereo, sim/stereo.py, ~+1.7 GB) are commented out: the default
+# depth is `mesh` (mujoco-rendered collision truth, zero extra deps), so the
+# image ships lean. To re-enable the stereo arm, uncomment the two
+# [stereo arm] blocks below and rebuild.
 RUN python3 -m pip install --no-cache-dir \
       -i https://mirrors.aliyun.com/pypi/simple/ uv \
     && uv venv --system-site-packages -p /usr/bin/python3 /opt/mjsim \
     && uv pip install --python /opt/mjsim/bin/python \
       --index-url https://mirrors.aliyun.com/pypi/simple/ \
       numpy==1.26.4 \
-      mujoco==3.14.0 opencv-python-headless wgpu==0.32.0 \
+      mujoco==3.14.0 onnxruntime opencv-python-headless wgpu==0.32.0 \
       viser==1.1.1 trimesh plyfile \
-      onnxruntime-gpu \
-      nvidia-cublas nvidia-cudnn-cu13 nvidia-cuda-runtime nvidia-cuda-nvrtc \
       https://files.pythonhosted.org/packages/76/95/b87b576f638b58d1a0104c27d7526cddf4f5fb0ec4a18743ea6f2f16c87c/gausscam-0.1.5-py3-none-any.whl \
-    && uv pip install --python /opt/mjsim/bin/python --no-deps \
-      --index-url https://mirrors.aliyun.com/pypi/simple/ \
-      nvidia-curand-cu12 \
     && rm -rf /root/.cache/uv
 
-# onnxruntime-gpu's CUDA EP (retinify stereo depth, sim/stereo.py) dlopens its
-# CUDA libs from these pip wheel dirs; ORT 1.31 is a CUDA 13 build but links
-# curand.so.10, hence the lone cu12 curand above. Registered with ldconfig so
-# no process needs an LD_LIBRARY_PATH export.
-RUN for d in /opt/mjsim/lib/python3.12/site-packages/nvidia/*/lib; do \
-      echo "$d" >> /etc/ld.so.conf.d/zz-ort-nvidia.conf; done \
-    && ldconfig
+# [stereo arm 1/2] onnxruntime-gpu + its CUDA 13 libs, and the lone cu12
+# curand (ORT 1.31 is a CUDA 13 build but links curand.so.10).
+# RUN uv pip install --python /opt/mjsim/bin/python \
+#       --index-url https://mirrors.aliyun.com/pypi/simple/ \
+#       onnxruntime-gpu \
+#       nvidia-cublas nvidia-cudnn-cu13 nvidia-cuda-runtime nvidia-cuda-nvrtc \
+#     && uv pip install --python /opt/mjsim/bin/python --no-deps \
+#       --index-url https://mirrors.aliyun.com/pypi/simple/ \
+#       nvidia-curand-cu12
+
+# [stereo arm 2/2] register the wheel lib dirs with ldconfig so no process
+# needs an LD_LIBRARY_PATH export.
+# RUN for d in /opt/mjsim/lib/python3.12/site-packages/nvidia/*/lib; do \
+#       echo "$d" >> /etc/ld.so.conf.d/zz-ort-nvidia.conf; done \
+#     && ldconfig
 
 # robot_emu DDS deps (docs/multi-robot-sim-testbench.md §6, mujoco/README
 # "dog" row): the emu wears the real robot's unitree-sdk2py face. TWO PINS

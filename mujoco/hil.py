@@ -64,6 +64,7 @@ from sim.plant import (  # noqa: E402
     reset_to_spawn,
 )
 from sim.policy import PieOnnxPolicy  # noqa: E402
+from sim.expert import DualExpertPolicy  # noqa: E402
 from sim.runtime import DepthCamera, PieRuntime  # noqa: E402
 from sim.keyboard import HoldCmd, KeyboardOverride  # noqa: E402
 
@@ -74,7 +75,7 @@ from hil import (  # noqa: E402
     TelemetrySink,
     mat_to_quat_xyzw,
     optical,
-    quat_xyzw_to_mat,
+    quat_wxyz_to_mat,
     rigid_inv,
     rigid_mul,
 )
@@ -102,6 +103,10 @@ def main() -> int:
     view_mode = _argv_value("--view", "web")      # web | glfw
     web_port = int(_argv_value("--web-port", "8012"))
     wall_alpha = float(_argv_value("--wall-alpha", "0.1"))
+    expert_mode = _argv_value("--expert", "auto")   # auto | stairs | flat | single
+    policy_path = _argv_value("--policy", None)
+    if expert_mode not in ("auto", "stairs", "flat", "single"):
+        raise SystemExit(f"unknown --expert {expert_mode!r}")
     if view_mode == "web":
         use_viewer = False    # web viewer replaces the GLFW window entirely
     p_host = _argv_value("--p-host", "127.0.0.1")
@@ -200,25 +205,18 @@ def main() -> int:
             web_scene.camera_tracking_enabled = False
             web_scene.create_visualization_gui()
 
-            def _frame_spawn(client):
-                def _apply():
-                    try:
-                        p = np.asarray(pos, float)
-                        # spawn sits in a ~0.9 m wide shaft compartment
-                        # (x wall 0.44 m away): stay inside it and look
-                        # from the shaft-center side.
-                        client.camera.position = p + np.array(
-                            [-0.35, -1.6, 0.6])
-                        client.camera.look_at = p
-                    except Exception:      # noqa: BLE001
-                        pass
-                # late re-apply: the client re-frames itself once the scene
-                # upload lands, so a single set at connect gets overwritten.
-                _apply()
-                for d in (1.5, 3.0, 6.0):
-                    threading.Timer(d, _apply).start()
-
-            web_server.on_client_connect(_frame_spawn)
+            # Framing via the server's initial_camera; the client applies it
+            # itself during init (its built-in default aims at the world
+            # ORIGIN -- what a fresh page shows until it lands). The
+            # per-client re-apply timers this replaced fired blind for 6 s
+            # and yanked the camera whenever the operator zoomed in that
+            # window after a refresh. Spawn sits in a ~0.9 m wide shaft
+            # compartment (x wall 0.44 m away): stay inside it and look
+            # from the shaft-center side.
+            p = np.asarray(pos, float)
+            web_server.initial_camera.position = tuple(
+                p + np.array([-0.35, -1.6, 0.6]))
+            web_server.initial_camera.look_at = tuple(p)
 
             # Reset/Stop live ONLY here in hil (no keyboard bindings):
             # the buttons set the flags the control loop consumes.
@@ -282,9 +280,11 @@ def main() -> int:
                       flush=True)
 
 
-    # camera mount T_base_camera (left optical), measured once at spawn
+    # camera mount T_base_camera (left optical), measured once at spawn.
+    # qpos free joint is WXYZ (MuJoCo order) -- parsed with the XYZW helper
+    # this error conjugated into every vio_100hz pose off the spawn pose.
     root = b.root_qpos_adr
-    T_wb = (quat_xyzw_to_mat(data.qpos[root + 3:root + 7]),
+    T_wb = (quat_wxyz_to_mat(data.qpos[root + 3:root + 7]),
             np.asarray(data.qpos[root:root + 3], float))
     cp, cm = ad.camera_poses(list(CAMS))
     T_wc = optical((np.asarray(cm[0], float), np.asarray(cp[0], float)))
@@ -305,8 +305,18 @@ def main() -> int:
     kb = HoldCmd()
     cmd_mux = KeyboardOverride(kb, face.cmd)
 
-    policy = PieOnnxPolicy(_HERE / "assets" / "policy" / sc.hil_policy,
-                           provider="cpu")
+    # Dual experts on stairs scenes (sim/expert.py): the scene's own veteran
+    # for forward/side commands, the flat omni net for backward. On the flat
+    # scene the primary IS the omni net -- a dual pair of the same file would
+    # only reset its GRU on every direction flip.
+    _flat = "policy_24000_flat_omni.onnx"
+    _primary = (Path(policy_path) if policy_path
+                else _HERE / "assets" / "policy" / sc.hil_policy)
+    if expert_mode == "single" or sc.hil_policy == _flat:
+        policy = PieOnnxPolicy(_primary, provider="cpu")
+    else:
+        policy = DualExpertPolicy(_primary, _HERE / "assets" / "policy" / _flat,
+                                  mode=expert_mode, provider="cpu")
     rt = PieRuntime(model, b, data, policy, policy_cam, cmd_mux,
                     spawn_pos=pos, spawn_yaw_deg=yaw_deg,
                     substep_hook=sink.sample)
@@ -468,6 +478,9 @@ def main() -> int:
                 print("[STOP] command zeroed (GUI Stop)", flush=True)
             now = time.perf_counter()
             if now >= next_ctrl:
+                sel = getattr(policy, "select", None)
+                if sel is not None:
+                    sel(float(cmd_mux.vector()[0]))
                 rt.tick()
                 next_ctrl = max(next_ctrl + CONTROL_DT, time.perf_counter())
                 # pose snapshot for the render thread: THE stamp = pose

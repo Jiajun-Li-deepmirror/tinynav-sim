@@ -56,6 +56,8 @@ ORACLE_TF_STATIC = [
 
 
 def quat_xyzw_to_mat(q) -> np.ndarray:
+    """XYZW (the ROS PoseStamped / publish convention). NEVER feed this a raw
+    MuJoCo qpos quat -- that is WXYZ; use quat_wxyz_to_mat for it."""
     x, y, z, w = (float(v) for v in q)
     n = x * x + y * y + z * z + w * w
     s = 0.0 if n < 1e-12 else 2.0 / n
@@ -64,6 +66,14 @@ def quat_xyzw_to_mat(q) -> np.ndarray:
         [s * (x * y + w * z), 1.0 - s * (x * x + z * z), s * (y * z - w * x)],
         [s * (x * z - w * y), s * (y * z + w * x), 1.0 - s * (x * x + y * y)],
     ])
+
+
+def quat_wxyz_to_mat(q) -> np.ndarray:
+    """WXYZ -- MuJoCo's own quaternion order (qpos free joint, and the order
+    dog.py writes into the emu state ring verbatim). Misreading this as XYZW
+    was the wrong-angle-render bug: the two orders differ by a large constant
+    rotation whenever w is not the smallest component."""
+    return quat_xyzw_to_mat((q[1], q[2], q[3], q[0]))
 
 
 def mat_to_quat_xyzw(R: np.ndarray):
@@ -149,8 +159,12 @@ class TelemetrySink:
             return self._pose
 
     def cam_pose_world(self, base_pos, base_quat):
-        """T_world_camera = T_world_base x T_base_camera (left optical)."""
-        return rigid_mul((quat_xyzw_to_mat(base_quat), np.asarray(base_pos, float)),
+        """T_world_camera = T_world_base x T_base_camera (left optical).
+        `base_quat` arrives in MuJoCo WXYZ order on every path here (sample()
+        slices it off MjData.qpos; contract_face's _ShimData relays the ring's
+        quat_wxyz) -- so WXYZ parsing, not the ROS-order helper."""
+        return rigid_mul((quat_wxyz_to_mat(base_quat),
+                          np.asarray(base_pos, float)),
                          self._t_base_cam)
 
 

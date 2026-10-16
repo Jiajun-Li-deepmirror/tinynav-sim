@@ -95,7 +95,13 @@ class RosFace(Face):
             rclpy.init()
         self.node = Node("insight_full")
 
-        img_qos = QoSProfile(depth=200, reliability=ReliabilityPolicy.RELIABLE,
+        # depth 4, not the oracle's 200: a RELIABLE KEEP_LAST(200) writer
+        # queues ~140 MB per image topic while no reader is up, and a
+        # late-joining reader then drowns in backlog replay (measured: depth
+        # delivered nothing in 8 s, face RSS +280 MB; reader-first
+        # delivered instantly). Matching only looks at
+        # reliability/durability, so the bridge's depth is unaffected.
+        img_qos = QoSProfile(depth=4, reliability=ReliabilityPolicy.RELIABLE,
                              history=HistoryPolicy.KEEP_LAST)
         pose_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
                               history=HistoryPolicy.KEEP_LAST)

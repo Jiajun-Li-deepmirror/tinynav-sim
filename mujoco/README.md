@@ -80,6 +80,17 @@ checkout 尚无提交，网格版本以 MANIFEST 校验和为准）。
 | hil（默认） | `hil.py` | DDS 契约面 + viser 网页 viewer（`--view glfw` 换原生窗） | 喂 navcore |
 | sim | `view.py` | viser 网页 viewer + 狗眼 splat（`--preview` 才推流），无 DDS | 人看/遥操 |
 | mj | `physics_view.py` | 纯 viewer + 策略 | 物理排查 |
+| dog | `dog.py`（或 `bash docker/run-mujoco-sim.sh dog -- --profile as2`） | 底盘 emu：go2 身体 + 真机 Unitree-DDS 脸（rt/* 话题 + sport RPC + 机型 FSM 门控），状态回传默认 20Hz | 多机型 pilot 驱动联调 |
+
+emu 的工具链（全部入库，可重放）：
+- **L0 单测**（纯逻辑免 SDK）：`python3 -m unittest robot_emu.tests.test_fsm robot_emu.tests.test_profile`（在 mujoco/ 下）。
+- **conformance**：`python3 -m robot_emu.conformance --profile as2 --iface docker0`——对运行中的 emu 枚举 DCPSPublication，按审计 curated 清单逐 (topic,type) 核对（go2/as2 均 PASS）。
+- **探针**：`python3 -m robot_emu.probe_as2|probe_go2 --iface docker0`——真 SDK 客户端核对线面事实 + FSM 门控序列，退出码即结论。
+- **e2e**：emu 侧跑 `dog.py` 后，pilot 侧容器里 `ROBOT_TYPE=as2 python3 -m robot_emu.e2e_driver`（生产 unitree_control 全链路：拒动→stand→走一米→sit，含 /unitree/odometry 断言）与 `python3 -m robot_emu.e2e_charge`（charge_watch 充放电判定）。
+- **场景注入**：JSON 发 `rt/emu/scenario`：`{"bms_ma":1500,"bms_soc":95}`（在桩充电）、`{"error_code":N}`、`{"refuse_move":true}`（障碍拒动，Move 回 -1 且机体停）、`{"cmd_blackout_s":2}`（断流 N 秒）、`{"reset":true}`（回出生点）、`{"clear":true}`。
+- **默认场景 flat**（纯平地无坠落面，长跑测试用）；`--scene map2|map3` 复用 hil 场景。
+
+dog/emu 的 DDS 依赖 unitree_sdk2py（纯 python；镜像 pip 安装 `mujoco/robot_emu/vendor/unitree_sdk2py` 里的 pin 源码检出——上游 `unitree_sdk2_python@814556d`，与 pilot 的 pyproject pin 同一 commit，子模块语义、提交时转正；树内直跑 DDS 模块前需先 `pip install` 该检出，L0 逻辑测试免安装）+ cyclonedds python 绑定。**版本必须 ≤0.10.x**：本机实测 cyclonedds 11 的 type object 会让 pilot 侧 0.10.2 解析段错误；mjsim (py3.12) 用 `CYCLONEDDS_HOME=<symlink farm→/opt/ros/jazzy>` 源码编 0.10.2 即可（其 libddsc 依赖 libiceoryx，也要链进 farm；Dockerfile 已把整套烤入）。**loopback 不能跑发现**（lo 无 IFF_MULTICAST，SDK 模板又没有 Peers 段）：bench 绑 `docker0`（有 MULTICAST flag、与真狗 123 网段隔离）。pilot 侧 ROS 2 与 SDK DDS 同域 0 并存无冲突；要严格隔离可在 bench 启动脚手架设 ROS_DOMAIN_ID（可选）。
 
 可视化四通道：viser 网页 viewer（hil/sim 都默认；无 DISPLAY 依赖、CPU 约为
 GLFW viewer 的 1/17，带浏览器 Reset/Stop 按钮——hil 里 Reset/Stop 只有按钮，
@@ -169,7 +180,8 @@ yaw −11.5°——狗眼 0.45m 只有低采段渲染干净，**换出生点先 
 节点（/insight_full）把契约直发 DDS——与 tinynav 栈同域（host network），
 节点身份即真（pilot 的就绪检查按名字找到的就是发布器本身）。跑在 mjsim
 容器里（jazzy，py3.12+rclpy；宿主 sim venv 无 ROS python，launch.sh 会
-拦截并指路容器）。
+拦截并指路容器）。跨机形态（网线连 Orin Nano 跑 pilot 全栈）的环境配置、
+编址与实测开销另见 [hil-orin-pilot.md](hil-orin-pilot.md)。
 
 契约（对齐 `../docs/looper-contract.md` oracle + 扩展）：
 infra1/infra2 整流灰度 mono8 544×640、depth mono16mm、color JPEG（四条 + vio_image
@@ -192,6 +204,8 @@ recreate 后需重加）。实测 `tools/probes/hil_rate_check.py`（rclpy 真�
 ```bash
 cd tinynav-sim
 bash docker/run-mujoco-sim.sh          # 默认 hil：DDS 直发 + viser :8012 + 键盘遥操
+bash docker/run-mujoco-sim.sh dog -- --profile go2 --iface <nic> --contract
+                                       # 全栈 emu（dog.py）：viser :8012 同样默认起（--view none 关）
 bash mujoco/scripts/launch.sh sim      # 交互沙盒（会话 sim；viser :8012，--preview 加 MJPEG :8888）
 bash mujoco/scripts/launch.sh mj       # 物理排查（会话 mj，原生窗口）
 # hil 需要 rclpy —— 宿主 sim venv 无 ROS python，launch.sh 会拦截并打印

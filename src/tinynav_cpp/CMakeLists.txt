@@ -110,10 +110,14 @@ ament_target_dependencies(tinynav_node rclcpp)
 # subscribes the camera-box-namespace products once, republishes the
 # canonical /slam/* names locally. Separate process = separate lifecycle
 # from the stack (the link must survive a stack crash).
+# The C++ looper bridge (replacement for the fleet's looper_bridge_node.py):
+# --hil is the full bridge the mujoco HIL rig runs (sync + keyframing + depth
+# conversion); a relay.yaml argument is the QoS-aware relay the gz split-site
+# deployment runs. See src/bridge_node.cpp for both modes' contracts.
 add_executable(tinynav_bridge src/bridge_node.cpp src/components/logging_setup.cpp)
 target_include_directories(tinynav_bridge PRIVATE include)
 target_link_libraries(tinynav_bridge yaml-cpp)
-ament_target_dependencies(tinynav_bridge rclcpp sensor_msgs nav_msgs)
+ament_target_dependencies(tinynav_bridge rclcpp sensor_msgs nav_msgs geometry_msgs)
 
 # ---------------------------------------------------------------- unitree chassis bridge (optional)
 # Port of pilot's unitree_control.py: rt/cmd_vel -> SportClient Move/gait FSM
@@ -151,6 +155,7 @@ endif()
 
 # ---------------------------------------------------------------- install
 install(TARGETS tinynav_core tinynav_trt ${COMPONENT_TARGETS} tinynav_node tinynav_bridge
+  tinynav_bridge_hil
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})

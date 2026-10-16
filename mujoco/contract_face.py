@@ -10,8 +10,11 @@ like any two containers, with plant state handed over on a /dev/shm ring.
 
 What it does = hil.py's render loop, minus the body: reads the state ring,
 composes each contract camera's world pose from the base pose via the mounts
-dog.py measured at spawn, renders the splat stereo pair + depth with gausscam,
-and publishes the looper contract as rclpy node `insight_full`.
+dog.py measured at spawn, renders the splat stereo pair with gausscam, and
+publishes the looper contract as rclpy node `insight_full`. The depth channel
+is selectable with --depth: `mesh` (mujoco-rendered collision-world truth
+from the scene model, pixel-aligned with the contract K), `stereo` (the
+retinify net on the rendered pair), `splat` (gausscam's depth render).
 
     python3 contract_face.py --ply model/splat/map3_scene.ply \
         --mounts '<json from dog.py>' [--cam-hz 10] [--vio-hz 100] \
@@ -128,10 +131,13 @@ def main() -> int:
     ap.add_argument("--vio-hz", type=float, default=100.0)
     ap.add_argument("--imu-every", type=int, default=1)
     ap.add_argument("--gpu", default="5070")
-    ap.add_argument("--depth", default="stereo", choices=["stereo", "splat"],
-                    help="stereo = retinify net on the rendered pair (the "
-                         "production path); splat = the gausscam depth render, "
-                         "kept as a comparison arm")
+    ap.add_argument("--depth", default="mesh",
+                    choices=["mesh", "stereo", "splat"],
+                    help="mesh = mujoco-rendered collision-world truth "
+                         "(default); stereo = retinify net on the rendered "
+                         "pair; splat = gausscam's depth render")
+    ap.add_argument("--scene", default="map3",
+                    help="scene whose model the mesh depth renders")
     ap.add_argument("--shm", default=SHM_PATH)
     args = ap.parse_args()
 
@@ -186,6 +192,58 @@ def main() -> int:
     pipe, variant = build_pipeline(Path(args.ply), args.gpu, cam_pos, cam_xmat)
     fxy, cx, cy = pipe._K
 
+    # GL-context ordering is load-bearing: this runs alongside the gausscam
+    # wgpu pipeline (wgpu-first is the proven order -- see hil.py's note).
+    # The EGL context is built lazily on FIRST CALL, not here: EGL contexts
+    # are thread-affine, mesh_depth runs on the render-loop thread, and a
+    # context built on this (main) thread fails every eglMakeCurrent there
+    # with EGL_BAD_ACCESS.
+    mesh_depth = None
+    if args.depth == "mesh":
+        _mesh: dict = {}
+
+        def mesh_depth(pos_w, quat_w):
+            """One contract mesh-depth frame (uint16 mm, 0 = no hit)."""
+            if not _mesh:
+                import mujoco as _mj
+
+                from sim.plant import build_model
+
+                model, _b = build_model(args.scene)
+                cam_id = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_CAMERA,
+                                        "infra1_contract")
+                if cam_id < 0:
+                    raise SystemExit("infra1_contract camera missing -- the "
+                                     "scene model predates "
+                                     "plant.CONTRACT_DEPTH_CAMERA")
+                # World-only mask: every static geom (catch floor + scene
+                # boxes) lives in group 0 and every robot geom in groups 2/3,
+                # so masking to group 0 removes the dog's own shell without
+                # touching the model -- the rig camera rides base_link and
+                # that shell in the near field would read as false obstacles.
+                rend = _mj.Renderer(model, height=CONTRACT_H,
+                                    width=CONTRACT_W)
+                rend.enable_depth_rendering()
+                rend.scene.flags[_mj.mjtRndFlag.mjRND_SHADOW] = 0
+                rend.scene.flags[_mj.mjtRndFlag.mjRND_REFLECTION] = 0
+                opt = _mj.MjvOption()
+                opt.geomgroup[:] = 0
+                opt.geomgroup[0] = 1   # the static world, and nothing else
+                far = float(model.vis.map.zfar * model.stat.extent)
+                _mesh.update(mj=_mj, model=model, data=_mj.MjData(model),
+                             rend=rend, opt=opt, cam=cam_id, far=far)
+                print(f"depth: mujoco mesh via infra1_contract "
+                      f"(contract fovy, far {far:.1f} m)", flush=True)
+            m = _mesh
+            m["data"].qpos[0:3] = pos_w
+            m["data"].qpos[3:7] = quat_w   # ring quats are WXYZ, MuJoCo's own
+            m["mj"].mj_forward(m["model"], m["data"])
+            m["rend"].update_scene(m["data"], camera=m["cam"],
+                                   scene_option=m["opt"])
+            d = np.asarray(m["rend"].render(), dtype=np.float32)
+            d[(~np.isfinite(d)) | (d <= 0.0) | (d >= m["far"] * 0.99)] = 0.0
+            return np.clip(d * 1000.0, 0, 65535).astype(np.uint16)
+
     stereo = None
     if args.depth == "stereo":
         from sim.stereo import RetinifyStereo
@@ -193,7 +251,7 @@ def main() -> int:
         stereo = RetinifyStereo()
         print(f"depth: retinify net @ {BASELINE * 100:.2f} cm baseline",
               flush=True)
-    else:
+    elif args.depth == "splat":
         print("depth: splat render (comparison arm)", flush=True)
     print(f"contract face: {CONTRACT_W}x{CONTRACT_H} "
           f"fovy={CONTRACT_FOVY_DEG:.3f} -> K fx=fy={fxy:.4f} "
@@ -265,7 +323,12 @@ def main() -> int:
 
                 gray_l = cv2.cvtColor(rgb[0], cv2.COLOR_RGB2GRAY)
                 gray_r = cv2.cvtColor(rgb[1], cv2.COLOR_RGB2GRAY)
-                if stereo is not None:
+                if mesh_depth is not None:
+                    # Collision-world truth, 10 Hz with the render loop; the
+                    # wire encoding (uint16 mm, 0 = invalid) matches the
+                    # other arms.
+                    depth_l = mesh_depth(pos, quat)
+                elif stereo is not None:
                     # Net depth on the rendered pair; the wire wants uint16
                     # millimetres (mono16), invalid pixels 0 -- the encoding
                     # the splat render already packs.

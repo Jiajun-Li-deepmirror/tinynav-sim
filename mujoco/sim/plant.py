@@ -124,6 +124,12 @@ RIG_POS = [0.19, 0.0, 0.09]
 RIG_QUAT_WXYZ = [0.5, 0.5, -0.5, -0.5]
 RIG_FOVY = 82.85
 
+# mesh-depth camera: infra1's pose at the LOOPER contract's vertical fovy,
+# so a mujoco-rendered depth is pixel-aligned with the contract K. The rig
+# cameras above carry the PIE rig's own fovy and feed the splat pipeline as
+# POSES ONLY -- their intrinsics are never projected through.
+CONTRACT_DEPTH_CAMERA = "infra1_contract"
+
 TERRAIN_FRICTION = (0.6, 0.005, 0.0001)
 
 DEPTH_CAMERA_NAME = "front_depth"
@@ -431,6 +437,14 @@ def build_model(scene_name: str = "map3") -> tuple[mujoco.MjModel, Bindings]:
             name=name, pos=[RIG_POS[0], y, RIG_POS[2]], quat=RIG_QUAT_WXYZ
         )
         cam.fovy = RIG_FOVY
+    from hil import CONTRACT_FOVY_DEG  # the looper contract's single source
+
+    base_in_scene.add_camera(
+        name=CONTRACT_DEPTH_CAMERA,
+        pos=[RIG_POS[0], RIG_Y["infra1"], RIG_POS[2]],
+        quat=RIG_QUAT_WXYZ,
+        fovy=CONTRACT_FOVY_DEG,
+    )
     _apply_plant_options(scene)
 
     model, b = _compile(scene, with_shell=True)

@@ -133,6 +133,7 @@ def _spawn_contract_face(ply: Path, mounts, args) -> subprocess.Popen:
     cmd = [sys.executable, "-u", str(_HERE / "contract_face.py"),
            "--ply", str(ply),
            "--mounts", json.dumps(mounts),
+           "--scene", args.scene,
            "--cam-hz", str(args.cam_hz),
            "--vio-hz", str(args.vio_hz),
            "--imu-every", str(args.imu_every),
@@ -196,9 +197,11 @@ def main() -> int:
     ap.add_argument("--policy", default=None,
                     help="ONNX pinned by --expert single "
                          "(default: the scene's expert)")
-    ap.add_argument("--depth", default="stereo", choices=["stereo", "splat"],
-                    help="contract face depth: stereo = retinify net on the "
-                         "rendered pair; splat = gausscam depth render")
+    ap.add_argument("--depth", default="mesh",
+                    choices=["mesh", "stereo", "splat"],
+                    help="contract face depth: mesh = mujoco collision-world "
+                         "truth; stereo = retinify net on the rendered pair; "
+                         "splat = gausscam depth render")
     ap.add_argument("--gpu", default="5070",
                     help="gausscam GPU selector (pick_variant name match)")
     args = ap.parse_args()

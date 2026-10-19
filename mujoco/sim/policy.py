@@ -18,11 +18,8 @@ from .contract import (
     DEPTH_HISTORY_SHAPE,
     JOINT_DAMPING,
     JOINT_STIFFNESS,
-    NUM_ACTIONS,
-    OBSERVATION_NAMES,
-    OBS_DIM,
-    PROPRIO_HISTORY_DIM,
 )
+from .contract_v2 import PieContract, contract_for
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -99,18 +96,14 @@ def _metadata_floats(metadata: dict[str, str], key: str) -> np.ndarray:
 
 
 class PieOnnxPolicy:
-    """ONNX policy wrapper that owns PIE's exported GRU state."""
+    """ONNX policy wrapper that owns PIE's exported GRU state.
 
-    INPUT_SHAPES = {
-        "proprio": (1, OBS_DIM),
-        "proprio_history": (1, PROPRIO_HISTORY_DIM),
-        "depth_history": (1, *DEPTH_HISTORY_SHAPE),
-        "memory_h_in": (1, 1, 128),
-    }
-    OUTPUT_SHAPES = {
-        "actions": (1, NUM_ACTIONS),
-        "memory_h_out": (1, 1, 128),
-    }
+    Also runs the depth-student exports (sim/contract_v2.py: same I/O names,
+    proprio with a gait phase, any robot's joints and action layout);
+    `self.contract` is the contract object the runtime builds observations
+    and actuator targets with. A policy without a depth_history input is
+    blind: `uses_depth` is False and the runtime skips the depth camera.
+    """
 
     def __init__(self, path: Path, provider: str = "auto") -> None:
         try:
@@ -147,6 +140,20 @@ class PieOnnxPolicy:
             str(self.path), sess_options=options, providers=providers
         )
         self.metadata = dict(self.session.get_modelmeta().custom_metadata_map)
+        self.contract = contract_for(self.metadata)
+        self.uses_depth = any(value.name == "depth_history"
+                              for value in self.session.get_inputs())
+        self.INPUT_SHAPES = {
+            "proprio": (1, self.contract.OBS_DIM),
+            "proprio_history": (1, self.contract.PROPRIO_HISTORY_DIM),
+            "memory_h_in": (1, 1, 128),
+        }
+        if self.uses_depth:
+            self.INPUT_SHAPES["depth_history"] = (1, *DEPTH_HISTORY_SHAPE)
+        self.OUTPUT_SHAPES = {
+            "actions": (1, self.contract.NUM_ACTIONS),
+            "memory_h_out": (1, 1, 128),
+        }
         self._validate_contract()
         self.reset()
 
@@ -165,14 +172,29 @@ class PieOnnxPolicy:
         }
         if actual_inputs != self.INPUT_SHAPES:
             raise ValueError(
-                "ONNX input contract does not match Unitree-Go2-PIE: "
+                f"ONNX input contract does not match {self.contract.name}: "
                 f"expected={self.INPUT_SHAPES}, actual={actual_inputs}."
             )
         if actual_outputs != self.OUTPUT_SHAPES:
             raise ValueError(
-                "ONNX output contract does not match Unitree-Go2-PIE: "
+                f"ONNX output contract does not match {self.contract.name}: "
                 f"expected={self.OUTPUT_SHAPES}, actual={actual_outputs}."
             )
+
+        observation_names = tuple(self.metadata.get("observation_names", "").split(","))
+        if observation_names != self.contract.OBSERVATION_NAMES:
+            raise ValueError(
+                "ONNX observation order does not match its contract: "
+                f"expected={self.contract.OBSERVATION_NAMES}, "
+                f"actual={observation_names}."
+            )
+        command_names = tuple(self.metadata.get("command_names", "").split(","))
+        if command_names != ("twist",):
+            raise ValueError(f"Unexpected ONNX command metadata: {command_names}.")
+        if not isinstance(self.contract, PieContract):
+            # Student exports describe their own robot; the runtime checks
+            # them against the plant (gains, default pose, joints).
+            return
 
         joint_names = tuple(self.metadata.get("joint_names", "").split(","))
         if joint_names != ACTUATED_JOINT_NAMES:
@@ -180,15 +202,6 @@ class PieOnnxPolicy:
                 "ONNX joint order does not match PIE: "
                 f"expected={ACTUATED_JOINT_NAMES}, actual={joint_names}."
             )
-        observation_names = tuple(self.metadata.get("observation_names", "").split(","))
-        if observation_names != OBSERVATION_NAMES:
-            raise ValueError(
-                "ONNX observation order does not match PIE: "
-                f"expected={OBSERVATION_NAMES}, actual={observation_names}."
-            )
-        command_names = tuple(self.metadata.get("command_names", "").split(","))
-        if command_names != ("twist",):
-            raise ValueError(f"Unexpected ONNX command metadata: {command_names}.")
 
         metadata_default = _metadata_floats(self.metadata, "default_joint_pos")
         if metadata_default.shape != DEFAULT_JOINT_POS.shape or not np.allclose(
@@ -225,15 +238,17 @@ class PieOnnxPolicy:
         depth_history: np.ndarray,
     ) -> np.ndarray:
         inputs = {
-            "proprio": np.asarray(proprio, dtype=np.float32).reshape(1, OBS_DIM),
-            "proprio_history": np.asarray(proprio_history, dtype=np.float32).reshape(
-                1, PROPRIO_HISTORY_DIM
+            "proprio": np.asarray(proprio, dtype=np.float32).reshape(
+                1, self.contract.OBS_DIM
             ),
-            "depth_history": np.asarray(depth_history, dtype=np.float32).reshape(
-                1, *DEPTH_HISTORY_SHAPE
+            "proprio_history": np.asarray(proprio_history, dtype=np.float32).reshape(
+                1, self.contract.PROPRIO_HISTORY_DIM
             ),
             "memory_h_in": self.memory_h,
         }
+        if self.uses_depth:
+            inputs["depth_history"] = np.asarray(
+                depth_history, dtype=np.float32).reshape(1, *DEPTH_HISTORY_SHAPE)
         outputs = self.session.run(["actions", "memory_h_out"], inputs)
         action = np.asarray(outputs[0], dtype=np.float32)
         memory_h = np.asarray(outputs[1], dtype=np.float32)
@@ -244,7 +259,7 @@ class PieOnnxPolicy:
         if not np.all(np.isfinite(action)) or not np.all(np.isfinite(memory_h)):
             raise FloatingPointError("PIE policy produced NaN or infinity.")
         self.memory_h = memory_h
-        return action.reshape(NUM_ACTIONS)
+        return action.reshape(self.contract.NUM_ACTIONS)
 
 
 __all__ = ["PieOnnxPolicy", "resolve_onnx_path"]

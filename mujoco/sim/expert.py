@@ -54,6 +54,10 @@ class DualExpertPolicy:
     def providers(self) -> list[str]:
         return self.active.providers
 
+    @property
+    def contract(self):
+        return self.active.contract
+
     def select(self, vx: float) -> str | None:
         """Auto rule ('auto' mode only). Returns the new active name on a
         switch, else None; called once per control tick by the host loop.

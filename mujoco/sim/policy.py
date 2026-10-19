@@ -1,8 +1,7 @@
-# Vendored from parkour_mjlab @ train/orient-ablation (da1ac23):
-#   deploy/pie/sim2sim/policy_runtime.py (contract import redirected to
-#   pie_contract). Owns the GRU memory and validates the ONNX metadata
-#   against pie_contract constants.
-"""Strict ONNX runtime wrapper for Unitree-Go2-PIE."""
+# Derived from parkour_mjlab @ train/orient-ablation (da1ac23):
+#   deploy/pie/sim2sim/policy_runtime.py. Owns the GRU memory and validates
+#   the ONNX I/O against its depth-student contract (sim/contract_v2.py).
+"""Strict ONNX runtime wrapper for the depth-student policies."""
 
 from __future__ import annotations
 
@@ -11,15 +10,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .contract import (
-    ACTION_SCALE,
-    ACTUATED_JOINT_NAMES,
-    DEFAULT_JOINT_POS,
-    DEPTH_HISTORY_SHAPE,
-    JOINT_DAMPING,
-    JOINT_STIFFNESS,
-)
-from .contract_v2 import PieContract, contract_for
+from .contract import DEPTH_HISTORY_SHAPE
+from .contract_v2 import contract_for
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -87,22 +79,16 @@ def _fixed_shape(value: Sequence[Any], name: str) -> tuple[int, ...]:
     return tuple(int(dim) for dim in value)
 
 
-def _metadata_floats(metadata: dict[str, str], key: str) -> np.ndarray:
-    try:
-        values = [float(item) for item in metadata[key].split(",") if item]
-    except KeyError as exc:
-        raise ValueError(f"ONNX metadata is missing {key!r}.") from exc
-    return np.asarray(values, dtype=np.float32)
-
-
 class PieOnnxPolicy:
-    """ONNX policy wrapper that owns PIE's exported GRU state.
+    """ONNX policy wrapper that owns the exported GRU state.
 
-    Also runs the depth-student exports (sim/contract_v2.py: same I/O names,
-    proprio with a gait phase, any robot's joints and action layout);
-    `self.contract` is the contract object the runtime builds observations
-    and actuator targets with. A policy without a depth_history input is
-    blind: `uses_depth` is False and the runtime skips the depth camera.
+    Runs the depth-student exports (sim/contract_v2.py: proprio with a gait
+    phase, any robot's joints and action layout; the I/O names are the PIE
+    export's, hence the class name); `self.contract` is the contract object
+    the runtime builds observations and actuator targets with. A policy
+    without a depth_history input is blind: `uses_depth` is False and the
+    runtime skips the depth camera. The runtime checks joints, default pose
+    and PD gains against the robot it drives.
     """
 
     def __init__(self, path: Path, provider: str = "auto") -> None:
@@ -110,7 +96,7 @@ class PieOnnxPolicy:
             import onnxruntime as ort
         except ImportError as exc:
             raise RuntimeError(
-                "onnxruntime is required to execute the exported PIE policy."
+                "onnxruntime is required to execute the exported policy."
             ) from exc
 
         options = ort.SessionOptions()
@@ -191,42 +177,6 @@ class PieOnnxPolicy:
         command_names = tuple(self.metadata.get("command_names", "").split(","))
         if command_names != ("twist",):
             raise ValueError(f"Unexpected ONNX command metadata: {command_names}.")
-        if not isinstance(self.contract, PieContract):
-            # Student exports describe their own robot; the runtime checks
-            # them against the plant (gains, default pose, joints).
-            return
-
-        joint_names = tuple(self.metadata.get("joint_names", "").split(","))
-        if joint_names != ACTUATED_JOINT_NAMES:
-            raise ValueError(
-                "ONNX joint order does not match PIE: "
-                f"expected={ACTUATED_JOINT_NAMES}, actual={joint_names}."
-            )
-
-        metadata_default = _metadata_floats(self.metadata, "default_joint_pos")
-        if metadata_default.shape != DEFAULT_JOINT_POS.shape or not np.allclose(
-            metadata_default, DEFAULT_JOINT_POS, atol=1.0e-3
-        ):
-            raise ValueError("ONNX default_joint_pos does not match PIE.")
-        metadata_scale = _metadata_floats(self.metadata, "action_scale")
-        # MJLab serializes a scalar JointPositionAction scale as one value,
-        # while a per-joint configuration is serialized as twelve values.
-        if metadata_scale.shape == (1,):
-            metadata_scale = np.full_like(ACTION_SCALE, metadata_scale.item())
-        if metadata_scale.shape != ACTION_SCALE.shape or not np.allclose(
-            metadata_scale, ACTION_SCALE, atol=1.0e-3
-        ):
-            raise ValueError("ONNX action_scale does not match PIE.")
-        metadata_stiffness = _metadata_floats(self.metadata, "joint_stiffness")
-        if metadata_stiffness.shape != JOINT_STIFFNESS.shape or not np.allclose(
-            metadata_stiffness, JOINT_STIFFNESS, atol=1.0e-3
-        ):
-            raise ValueError("ONNX joint_stiffness does not match PIE.")
-        metadata_damping = _metadata_floats(self.metadata, "joint_damping")
-        if metadata_damping.shape != JOINT_DAMPING.shape or not np.allclose(
-            metadata_damping, JOINT_DAMPING, atol=1.0e-3
-        ):
-            raise ValueError("ONNX joint_damping does not match PIE.")
 
     def reset(self) -> None:
         self.memory_h = np.zeros((1, 1, 128), dtype=np.float32)

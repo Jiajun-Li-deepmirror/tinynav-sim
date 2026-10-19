@@ -1,4 +1,4 @@
-"""Policy contracts of the depth-student family (and a PIE adapter).
+"""Policy contracts of the depth-student family.
 
 unitree_rl_mjlab Unitree-<Robot>-Depth-Student exports, one per robot:
 go2_depth_v2 (Go2), as2_depth_v1 / b2_depth_v1 (legged) and go2w_depth_v1 /
@@ -21,8 +21,6 @@ phase = (sin, cos)(2 pi * t / 0.6 s), t = control_step * CONTROL_DT counted
 from the last reset, and zero while |command| < 0.1 (training also zeroes
 commands below that norm, so the same deadzone is applied to the command).
 Mirrors unitree_rl_mjlab src/tasks/velocity/mdp/observations.py::phase.
-
-PieContract wraps sim/contract.py in the same interface for the runtime.
 """
 
 from __future__ import annotations
@@ -34,7 +32,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import contract as _pie
 from .contract import CONTROL_DT, PROPRIO_HISTORY_LENGTH, projected_gravity
 
 STUDENT_CONTRACTS = (
@@ -217,40 +214,12 @@ class StudentContract:
         return np.ascontiguousarray(observation)
 
 
-class PieContract:
-    """sim/contract.py (PIE, 45-D, no phase, unshaped command) in the
-    StudentContract interface."""
-
-    name = "pie"
-    joint_names = _pie.ACTUATED_JOINT_NAMES
-    default_joint_pos = _pie.DEFAULT_JOINT_POS
-    action_groups = (ActionGroup("position", 0.25, _pie.ACTUATED_JOINT_NAMES),)
-    position_joints = _pie.ACTUATED_JOINT_NAMES
-    NUM_ACTIONS = _pie.NUM_ACTIONS
-    OBSERVATION_NAMES = _pie.OBSERVATION_NAMES
-    OBSERVATION_TERM_DIMS = _pie.OBSERVATION_TERM_DIMS
-    OBS_DIM = _pie.OBS_DIM
-    PROPRIO_HISTORY_DIM = _pie.PROPRIO_HISTORY_DIM
-    COMMAND_LOW = COMMAND_HIGH = None
-
-    def ProprioHistory(self) -> _pie.ProprioHistory:  # noqa: N802
-        return _pie.ProprioHistory()
-
-    def shape_command(self, command: Sequence[float]) -> np.ndarray:
-        return np.asarray(command, dtype=np.float32).reshape(3)
-
-    def build_proprioception(self, base_ang_vel, quaternion_wxyz, command,
-                             joint_pos, joint_vel, last_action,
-                             control_step: int) -> np.ndarray:
-        del control_step
-        return _pie.build_proprioception(base_ang_vel, quaternion_wxyz, command,
-                                         joint_pos, joint_vel, last_action)
-
-
-def contract_for(metadata: dict[str, str]):
-    """ONNX metadata -> contract object (PIE exports carry no "contract")."""
+def contract_for(metadata: dict[str, str]) -> StudentContract:
+    """ONNX metadata -> contract object; exports without a "contract" key
+    (e.g. the retired PIE policies) are refused."""
     if "contract" not in metadata:
-        return PieContract()
+        raise ValueError("ONNX metadata has no 'contract': not a depth-student "
+                         f"export (known: {', '.join(STUDENT_CONTRACTS)}).")
     return StudentContract(metadata)
 
 
@@ -258,7 +227,6 @@ __all__ = [
     "ActionGroup",
     "COMMAND_HIGH",
     "COMMAND_LOW",
-    "PieContract",
     "STUDENT_CONTRACTS",
     "StudentContract",
     "TermHistory",

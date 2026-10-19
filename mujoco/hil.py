@@ -35,9 +35,9 @@ reset a live HIL session.
 
 --robot picks the body (sim/robots.py) at boot -- the face measures its
 camera mounts once, so the web panel shows the robot but cannot swap it
-(view.py can). go2 keeps the scene's PIE policies; other robots run their
-registry perception policy. The panel's perception toggle swaps to the
-robot's blind policy when it has one.
+(view.py can). The robot's registry perception policy drives it (--policy
+pins another ONNX); the panel's perception toggle swaps to the robot's
+blind policy when it has one.
 """
 from __future__ import annotations
 
@@ -73,7 +73,6 @@ from sim.plant import (  # noqa: E402
     reset_to_spawn,
 )
 from sim.policy import PieOnnxPolicy  # noqa: E402
-from sim.expert import DualExpertPolicy  # noqa: E402
 from sim.gamepad import GamepadCmd, GamepadOverride  # noqa: E402
 from sim.robots import DEFAULT_ROBOT, ROBOTS, get_robot  # noqa: E402
 from sim.runtime import DepthCamera, PieRuntime  # noqa: E402
@@ -100,13 +99,8 @@ def _argv_value(flag: str, default):
 
 
 def _pad_envelope(policy):
-    """Gamepad full deflection: the policy's training envelope, or the
-    keyboard caps for PIE."""
-    k = policy.contract
-    if k.COMMAND_LOW is not None:
-        return k.COMMAND_LOW, k.COMMAND_HIGH
-    from sim.keyboard import VX_HOLD, VX_HOLD_BWD, WZ_HOLD
-    return (-VX_HOLD_BWD, 0.0, -WZ_HOLD), (VX_HOLD, 0.0, WZ_HOLD)
+    """Gamepad full deflection = the policy's training command envelope."""
+    return policy.contract.COMMAND_LOW, policy.contract.COMMAND_HIGH
 
 
 def main() -> int:
@@ -124,11 +118,8 @@ def main() -> int:
     view_mode = _argv_value("--view", "web")      # web | glfw
     web_port = int(_argv_value("--web-port", "8012"))
     wall_alpha = float(_argv_value("--wall-alpha", "0.1"))
-    expert_mode = _argv_value("--expert", "auto")   # auto | stairs | flat | single
     policy_path = _argv_value("--policy", None)
     robot = get_robot(_argv_value("--robot", DEFAULT_ROBOT))
-    if expert_mode not in ("auto", "stairs", "flat", "single"):
-        raise SystemExit(f"unknown --expert {expert_mode!r}")
     if view_mode == "web":
         use_viewer = False    # web viewer replaces the GLFW window entirely
     p_host = _argv_value("--p-host", "127.0.0.1")
@@ -318,19 +309,9 @@ def main() -> int:
     pad = GamepadCmd(enabled="--gamepad" in sys.argv)
     cmd_mux = KeyboardOverride(kb, GamepadOverride(pad, face.cmd))
 
-    # Dual experts on stairs scenes (sim/expert.py): the scene's own veteran
-    # for forward/side commands, the flat omni net for backward. On the flat
-    # scene the primary IS the omni net -- a dual pair of the same file would
-    # only reset its GRU on every direction flip.
-    _flat = "policy_24000_flat_omni.onnx"
     _primary = (Path(policy_path) if policy_path
-                else _HERE / "assets" / "policy" / sc.hil_policy
-                if robot.pie_plant else robot.policy_path("perception"))
-    if expert_mode == "single" or sc.hil_policy == _flat or not robot.pie_plant:
-        policy = PieOnnxPolicy(_primary, provider="cpu")
-    else:
-        policy = DualExpertPolicy(_primary, _HERE / "assets" / "policy" / _flat,
-                                  mode=expert_mode, provider="cpu")
+                else robot.policy_path("perception"))
+    policy = PieOnnxPolicy(_primary, provider="cpu")
     rt = PieRuntime(model, b, data, policy, policy_cam, cmd_mux,
                     spawn_pos=pos, spawn_yaw_deg=yaw_deg,
                     substep_hook=sink.sample)
@@ -524,9 +505,6 @@ def main() -> int:
                                  robot.has_policy("blind"))
             now = time.perf_counter()
             if now >= next_ctrl:
-                sel = getattr(policy, "select", None)
-                if sel is not None:
-                    sel(float(cmd_mux.vector()[0]))
                 rt.tick()
                 next_ctrl = max(next_ctrl + CONTROL_DT, time.perf_counter())
                 # pose snapshot for the render thread: THE stamp = pose
@@ -561,8 +539,8 @@ def main() -> int:
                     panel.update(
                         rt.base_pos(), data.qpos[root + 3:root + 7],
                         rt.depth_frame(),
-                        f"{robot.label} · {getattr(policy, 'active_name', '')} "
-                        f"{policy.contract.name} · cmd {rt.command[0]:+.2f} "
+                        f"{robot.label} · {policy.contract.name} · "
+                        f"cmd {rt.command[0]:+.2f} "
                         f"{rt.command[1]:+.2f} {rt.command[2]:+.2f} "
                         f"({cmd_mux.state}) · gamepad {pad_txt}")
                 t_view = now2

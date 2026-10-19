@@ -1,6 +1,7 @@
 # MuJoCo dog sim: 策略驱动 + wgpu 3DGS 传感器视图 + HIL 双传输面
 
-Unitree Go2 由楼梯下坡策略（ONNX）驱动，在 map3 楼梯井里行走（MuJoCo 物理），
+Unitree 四足（默认 Go2，见机型注册表）由自训的深度策略（ONNX）驱动，在 map3
+楼梯井里行走（MuJoCo 物理），
 狗眼相机画面由 gausscam（原 splatsense）的 wgpu 管线渲染（3DGS）。整体跑在
 tinynav-sim 仓，作为"整体仿真"侧：既可以人机交互遛狗，也可以作为传感器源喂
 navcore 做验证。
@@ -20,11 +21,9 @@ mujoco/
 ├── sim/                 仿真核心包（与传输/显示无关）
 │   ├── contract.py      策略 I/O 契约（vendor 自上游 sim2sim，常量勿改）
 │   ├── contract_v2.py   深度学生策略契约族（按 ONNX 元数据：足式 47 维、
-│                        轮足 55 维，腿位置 + 轮速度动作）+ PIE 适配
+│                        轮足 55 维，腿位置 + 轮速度动作）
 │   ├── robots.py        机型注册表：MJCF / 网格 / 相机安装位 / 感知·盲策略
 │   ├── policy.py        ONNX 策略会话（GRU memory + 元数据契约校验，CPU 单线程）
-│   ├── expert.py        双专家选择器（stairs+flat；vx 迟滞自动切 + CLI 强制档，
-│                        GRU 切换清零）
 │   ├── plant.py         世界搭建：场景 + 注册表机型 + 执行器内 PD + rig 相机
 │   ├── runtime.py       50Hz 控制循环（深度 10Hz → obs → 策略 → 4×mj_step）
 │   ├── keyboard.py      /dev/input 全局按键轮询（零依赖）
@@ -40,14 +39,10 @@ mujoco/
 ├── assets/
 │   ├── mjcf/            map3 scene.xml + map3_collision.xml（123 box，唯一源）
 │   ├── .compose/        plant.py 运行时生成的预处理场景（gitignore，勿手改）
-│   ├── go2/             go2_pie.xml（PIE 策略变体骨架；网格在 model/ 资产包，见下）
+│   ├── go2/             go2_pie.xml（Go2 机体骨架；网格在 model/ 资产包，见下）
 │   ├── <robot>/         go2w/as2/as2w/b2/b2w 训练 MJCF（训练仓导出，含执行器与
 │                        碰撞配置，勿手改；网格在 model/<robot>/assets）
-│   └── policy/          policy.onnx（= model_18997，PIE 楼梯策略，见
-│                        ../docs/stairs-map3-experiments.md）
-│                        + policy_24000_flat_omni.onnx（平地全向专家，
-│                        PIE 双专家 auto 的后退分支，见同文）
-│                        + <robot>_depth_v*.onnx（各机型深度学生，机型注册表用）
+│   └── policy/          <robot>_depth_v*.onnx（各机型深度学生，机型注册表用）
 │                        + policy.sha256（训练侧校验清单）
 └── scripts/
     ├── launch.sh        统一 tmux 启动器（sim | mj | hil）
@@ -74,8 +69,10 @@ b2w/` 为各机型减面 MSH（训练仓 unitree_rl_mjlab 网格 →
 `mujoco/scripts/decimate_mesh.py`，每个目录有 README 记出处）。
 历史：本仓 `assets/go2/assets/` 曾带 25.5MB menagerie OBJ，
 减面迁移后删除（上游 menagerie 与 splatsense examples 各有全量副本）。
-入库的 `policy.onnx` 来自 RL 训练仓（hash 见 policy.sha256，
-其 .pt 血缘在训练侧，本仓只带 onnx）。
+入库的策略 ONNX 来自 RL 训练仓 unitree_rl_mjlab（hash 见 policy.sha256，
+其 .pt 血缘在训练侧，本仓只带 onnx）。PIE 策略（policy.onnx = model_18997、
+policy_24000_flat_omni.onnx）与双专家选择器已于 2026-10 移除，统一用自训
+策略；实验档案见 ../docs/stairs-map3-experiments.md 与 git 历史。
 
 ## 命名约定
 
@@ -115,11 +112,10 @@ OpenCV/Qt 窗口形态已废除（混合图形机器上 Qt 是四客户端
 `~/workspace/dm/archive/gausscam-archive/p2-wgpu-report.md` §7/§8）。
 
 场景：`plant.SCENES` 注册表，hil/sim/mj 都吃 `--scene map3|map2`（默认
-map3）。**map3** = 楼梯井（123 box 精确碰撞，出生 F1 正对 L0 梯段，hil 载
-楼梯专家 18997）。**map2** = MetaCam map_2 室内（spirula 50k，2.98M 高斯；
+map3）。**map3** = 楼梯井（123 box 精确碰撞，出生 F1 正对 L0 梯段）。**map2** = MetaCam map_2 室内（spirula 50k，2.98M 高斯；
 平地 box + 边界墙碰撞，出生 `low` = gsplat 验证过的低采段点 (3.21,−5.54)，
 yaw −11.5°——狗眼 0.45m 只有低采段渲染干净，**换出生点先 `--preview` 渲两
-帧对质再走**；hil 载平地专家 24000，sim 双专家 auto 不变）。碰撞地面高
+帧对质再走**）。策略跟机型走、与场景无关。碰撞地面高
 度在 `map2_scene.xml` + 注册表各有一处，改要一起改；新场景 = 一份 mjcf +
 注册表一个条目。
 
@@ -189,7 +185,8 @@ yaw −11.5°——狗眼 0.45m 只有低采段渲染干净，**换出生点先 
 
 ## 机型、策略与网页操作面板
 
-机型注册表 `sim/robots.py`：go2（PIE 机体，go2_pie.xml）、go2w、as2、as2w、
+机型注册表 `sim/robots.py`：go2（go2_pie.xml 机体，执行器常量取
+sim/contract.py，与训练一致）、go2w、as2、as2w、
 b2、b2w。后五个的 MJCF 是训练仓（unitree_rl_mjlab 分支 go2-depth）用
 `scripts/go2_depth/export_sim_robot.py` 导出的训练原样机体（执行器 PD /
 力矩上限 / armature、碰撞配置、轮子球形碰撞都在 XML 里，勿手改，改了重导）；
@@ -227,11 +224,11 @@ MSH + wheel）。深度相机安装位取训练值——**只有 Go2 是实测�
   10 Hz，turbo：近红、3 m 外深蓝），仅感知策略时显示；底部状态行（机型 · 策略 ·
   指令 · 手柄）。
 
-`view.py` 默认策略改为注册表（go2 = go2_depth_v2）；PIE 双专家用
-`--expert auto|stairs|flat` 找回（仅 go2）。`--policy <onnx>` 固定单个 ONNX，
-`--blind` 以盲策略启动。splat 管线只在 `--preview` 时建立（它是唯一消费者），
-所以纯网页形态不再需要 gausscam / splat 资产。hil.py 的默认（go2 + 场景 PIE
-策略）不变。
+所有宿主（view / hil / dog / mj / smoke）都用注册表策略（go2 =
+go2_depth_v2）；`--policy <onnx>` 固定单个 ONNX，`--blind`（view）以盲策略
+启动。没有 `contract` 元数据的 ONNX（如旧 PIE 导出）会被拒绝。view.py 的
+splat 管线只在 `--preview` 时建立（它是唯一消费者），所以纯网页形态不再需要
+gausscam / splat 资产。
 
 ## HIL：DDS 契约面
 
@@ -287,9 +284,7 @@ run-mujoco-sim.sh 的 /dev/input 挂载可见；插拔 2s 内自动识别）：�
 vx（推满 = 训练包络上限 1.0，后拉 0.5）/vy（±0.5），右摇杆 X wz（±1.2），A
 开关手柄接管，B 按住急停（零指令）。接管开（`--gamepad`、面板勾选或按 A）
 时手柄驱动——摇杆回中即原地站立，不交还；hil 里手柄覆盖 DDS /cmd_vel，键盘
-再覆盖手柄。包络随当前策略（PIE 用键盘档位）。
-PIE 双专家选择器（`--expert auto|stairs|flat`）：↓ 自动切平地专家、其余指令
-走楼梯主力；切换时目标专家 GRU 清零，状态行 `exp=` 显示当前激活专家。
+再覆盖手柄。包络随当前策略的训练指令范围。
 
 ## 依赖
 

@@ -21,13 +21,10 @@ sim/keyboard.py), `,`/`.` strafe; a gamepad on the sim host drives when
 gamepad control is on (`--gamepad`, the panel checkbox or A on the pad;
 sim/gamepad.py), held arrows still win over it.
 
-Policies: by default the robot's registry policy (`--robot`, default go2:
-the go2_depth_v2 student; `--blind` starts on the blind one). `--policy
-<file>` pins one ONNX for the robot. On go2, `--expert auto|stairs|flat`
-restores the PIE dual-expert pair: backward commands ride the flat omni
-expert, everything else the stairs veteran (sim/expert.py); `--expert
-single --policy <file>` pins one ONNX. `--view glfw` restores the native
-MuJoCo window (with the 12 s wedge guard).
+Policies: the robot's registry policy (`--robot`, default go2: the
+go2_depth_v2 student; `--blind` starts on the blind one); `--policy <file>`
+pins one ONNX for the robot. `--view glfw` restores the native MuJoCo
+window (with the 12 s wedge guard).
 
 Clean exit path uses os._exit: the mixed GL atexit teardown segfaults on
 this driver (kernel error 15 after DONE).
@@ -76,8 +73,6 @@ from sim.policy import PieOnnxPolicy  # noqa: E402
 from sim.robots import DEFAULT_ROBOT, ROBOTS, get_robot  # noqa: E402
 from sim.runtime import DepthCamera, PieRuntime  # noqa: E402
 
-ONNX = _HERE / "assets" / "policy" / "policy.onnx"
-FLAT_ONNX = _HERE / "assets" / "policy" / "policy_24000_flat_omni.onnx"
 CONTROL_DT = 0.02
 RENDER_HZ = 15.0
 CAM = "infra1"
@@ -193,7 +188,7 @@ class World:
 
     def __init__(self, scene_name: str, robot: str, kind: str, cmd, pos,
                  yaw_deg: float, policy_path: str | None = None,
-                 expert_mode: str | None = None, wall_alpha: float = 1.0) -> None:
+                 wall_alpha: float = 1.0) -> None:
         self.robot = get_robot(robot)
         self.scene_name, self.pos, self.yaw_deg, self.cmd = scene_name, pos, yaw_deg, cmd
         self.model, self.b = build_model(scene_name, robot)
@@ -209,20 +204,11 @@ class World:
         reset_to_spawn(self.model, self.data, self.b, settle=True,
                        pos=pos, yaw_deg=yaw_deg)
         self.kind = kind
-        self.policy = self._load_policy(kind, policy_path, expert_mode)
+        self.policy = self._load_policy(kind, policy_path)
         self.cam = None
         self.rt = None
 
-    def _load_policy(self, kind: str, policy_path: str | None,
-                     expert_mode: str | None):
-        if expert_mode is not None and expert_mode != "single":
-            if not self.robot.pie_plant:
-                raise SystemExit("--expert drives the PIE go2 pair; "
-                                 f"{self.robot.name} has no PIE policies")
-            from sim.expert import DualExpertPolicy
-            self.policy_name = f"PIE dual ({expert_mode})"
-            return DualExpertPolicy(ONNX, FLAT_ONNX, mode=expert_mode,
-                                    provider="cpu")
+    def _load_policy(self, kind: str, policy_path: str | None):
         if policy_path is None:
             path = self.robot.policy_path(kind)
             if path is None or not path.is_file():
@@ -243,7 +229,7 @@ class World:
     def set_kind(self, kind: str) -> None:
         """Swap perception <-> blind in place (robot state kept, fresh
         policy memory and histories)."""
-        policy = self._load_policy(kind, None, None)
+        policy = self._load_policy(kind, None)
         self.rt = PieRuntime(self.model, self.b, self.data, policy, self.cam,
                              self.cmd, spawn_pos=self.pos,
                              spawn_yaw_deg=self.yaw_deg)
@@ -258,13 +244,8 @@ class World:
             self.cam.close()
 
     def pad_envelope(self):
-        """Gamepad full deflection: the policy's training envelope, or the
-        keyboard caps for PIE."""
-        k = self.policy.contract
-        if k.COMMAND_LOW is not None:
-            return k.COMMAND_LOW, k.COMMAND_HIGH
-        from sim.keyboard import VX_HOLD, VX_HOLD_BWD, WZ_HOLD
-        return (-VX_HOLD_BWD, 0.0, -WZ_HOLD), (VX_HOLD, 0.0, WZ_HOLD)
+        """Gamepad full deflection = the policy's training command envelope."""
+        return self.policy.contract.COMMAND_LOW, self.policy.contract.COMMAND_HIGH
 
 
 def main() -> int:
@@ -276,8 +257,6 @@ def main() -> int:
     robot_name = _argv_value("--robot", DEFAULT_ROBOT)
     get_robot(robot_name)
     kind = "blind" if "--blind" in sys.argv else "perception"
-    # --expert (go2): the legacy PIE pair; none = the registry policy
-    expert_mode = _argv_value("--expert", None)   # auto | stairs | flat | single
     policy_path = _argv_value("--policy", None)
     view_mode = _argv_value("--view", "web")    # web | glfw
     web_port = int(_argv_value("--web-port", "8012"))
@@ -300,12 +279,9 @@ def main() -> int:
     pad = GamepadCmd(enabled=use_gamepad)
     cmd = KeyboardOverride(kb, GamepadOverride(pad, ConstantCmd(vx=0.0)))
     world = World(scene_name, robot_name, kind, cmd, pos, yaw_deg,
-                  policy_path=policy_path, expert_mode=expert_mode,
+                  policy_path=policy_path,
                   wall_alpha=wall_alpha if view_mode == "web" else 1.0)
     pad.set_envelope(*world.pad_envelope())
-
-    def expert_tag() -> str:
-        return str(getattr(world.policy, "active_name", "single"))   # single-threaded session
 
     # wgpu splat pipeline (--preview only, its one consumer): static scene
     # only, exactly like hil -- GaussianCloud.from_ply -> RAW INRIA values
@@ -493,8 +469,6 @@ def main() -> int:
             if kb.consume_reset():
                 world.reset()
                 print("[RESET] back to spawn", flush=True)
-            if hasattr(world.policy, "select"):
-                world.policy.select(float(cmd.vector()[0]))
             world.rt.tick()
             next_ctrl = max(next_ctrl + CONTROL_DT, time.perf_counter())
         if now >= next_render:
@@ -573,7 +547,7 @@ def main() -> int:
                 except Exception as exc:      # noqa: BLE001
                     cam_txt = f" camERR={exc!r}"
                 print(f"{fps:4.1f}fps  cmd={cmd.state:5s} "
-                      f"{world.robot.name} exp={expert_tag():6s} "
+                      f"{world.robot.name} "
                       f"vx={rt.command[0]:+.2f} vy={rt.command[1]:+.2f} "
                       f"wz={rt.command[2]:+.2f} "
                       f"up={rt.base_uprightness():.2f} "

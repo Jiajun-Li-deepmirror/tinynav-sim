@@ -8,9 +8,8 @@ Modes (all headless, realtime pacing unless --no-realtime):
   down   spawn on landing_F4_east facing down the R2b flight (8 treads,
          159 mm rise each) and descend with vx=--vx
 
---robot picks the body (sim/robots.py); go2 runs PIE's policy.onnx (the
-smoke ladder), other robots their registry perception policy. --onnx
-overrides either.
+--robot picks the body (sim/robots.py) and its registry perception policy;
+--onnx overrides the policy.
 """
 
 from __future__ import annotations
@@ -39,7 +38,6 @@ from sim.policy import PieOnnxPolicy  # noqa: E402
 from sim.robots import ROBOTS, get_robot  # noqa: E402
 from sim.runtime import DepthCamera, PieRuntime  # noqa: E402
 
-ONNX = _HERE / "assets" / "policy" / "policy.onnx"
 CONTROL_DT = C.PHYSICS_DT * C.PHYSICS_STEPS_PER_CONTROL
 
 def run(mode: str, stand_s: float, walk_s: float, vx: float, wz: float,
@@ -59,8 +57,7 @@ def run(mode: str, stand_s: float, walk_s: float, vx: float, wz: float,
           f"z-ground unknown (settled)")
 
     if onnx_path is None:
-        onnx_path = (ONNX if robot == "go2"
-                     else get_robot(robot).policy_path("perception"))
+        onnx_path = get_robot(robot).policy_path("perception")
     policy = PieOnnxPolicy(Path(onnx_path), provider="cpu")
     print(f"[{mode}] robot={robot} policy={Path(onnx_path).name} "
           f"contract={policy.contract.name}")
@@ -116,8 +113,8 @@ def main() -> int:
     ap.add_argument("--no-realtime", action="store_true")
     ap.add_argument("--robot", default="go2", choices=sorted(ROBOTS))
     ap.add_argument("--onnx", default=None,
-                    help="policy file override (default: go2 assets/policy/"
-                         "policy.onnx, other robots their registry policy)")
+                    help="policy file override (default: the robot's "
+                         "registry perception policy)")
     args = ap.parse_args()
     return run(args.mode, args.stand, args.walk, args.vx, args.wz,
                realtime=not args.no_realtime, onnx_path=args.onnx, vy=args.vy,

@@ -140,8 +140,9 @@ DEPTH_CAMERA_NAME = "front_depth"
 @dataclass(frozen=True)
 class Scene:
     """One navigable world: mjcf (+ optional collision fragment), catch
-    floor, splat ply (model/splat/), named spawns, and the policy the hil
-    single-policy host loads. Register a new scene = one dict entry.
+    floor, splat ply (model/splat/) and named spawns. Policies belong to
+    the robot (sim/robots.py), not the scene. Register a new scene = one
+    dict entry.
     xml is None only for the procedural "flat" smoke terrain (built from
     a string, no mjcf file)."""
 
@@ -151,15 +152,12 @@ class Scene:
     ply: str
     spawns: dict
     default_spawn: str
-    hil_policy: str
 
 
 SCENES: dict[str, Scene] = {
     # flat smoke terrain: procedural ground plane + go2 (build_flat_model),
     # no walls and no catch cliff -- the emu bench's long-run scene. The
     # 20 m plane bounds the walk far before integrator drift matters.
-    # Policy = policy.onnx, the canonical smoke.py flat pairing (ladder
-    # step 2): the flat-omni expert also walks here but is kept on map2.
     "flat": Scene(
         xml=None,
         collision=None,
@@ -167,7 +165,6 @@ SCENES: dict[str, Scene] = {
         ply="",
         spawns={"origin": ((0.0, 0.0, 0.32), 0.0)},
         default_spawn="origin",
-        hil_policy="policy.onnx",
     ),
     # map3 stairwell: 123 exact collision boxes (Blender rebuild), F1 slab
     # tops at z=0, catch floor 5 cm below.
@@ -182,14 +179,12 @@ SCENES: dict[str, Scene] = {
             "flat1": ((-7.4, 4.0, 12.2), 180.0),
         },
         default_spawn="down",
-        hil_policy="policy.onnx",          # stairs expert model_18997
     ),
     # MetaCam map_2 indoor (spirula_ba_s2 step-50000, 2.98M gaussians).
     # Spawn = the gsplat-validated low-capture-band spot (map2_go2.json
     # initial_qpos, yaw -11.49); ground top -1.20 from the spawn-footprint
     # gaussian histogram -- see map2_scene.xml, recalibrate ground there
-    # AND here together by render. Flat indoor: hil loads the flat-omni
-    # expert, view keeps dual-expert auto.
+    # AND here together by render.
     "map2": Scene(
         xml=ASSETS / "mjcf" / "map2_scene.xml",
         collision=None,
@@ -197,7 +192,6 @@ SCENES: dict[str, Scene] = {
         ply="map2_scene.ply",
         spawns={"low": ((3.21, -5.54, -0.755), -11.49)},
         default_spawn="low",
-        hil_policy="policy_24000_flat_omni.onnx",
     ),
 }
 _ACTIVE = SCENES["map3"]

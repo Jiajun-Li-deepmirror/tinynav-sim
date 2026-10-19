@@ -189,14 +189,9 @@ def main() -> int:
     ap.add_argument("--cam-hz", type=float, default=10.0)
     ap.add_argument("--vio-hz", type=float, default=100.0)
     ap.add_argument("--imu-every", type=int, default=1)
-    ap.add_argument("--expert", default="auto",
-                    choices=["auto", "stairs", "flat", "single"],
-                    help="expert selector: auto = backward commands ride the "
-                         "flat omni net, the rest the scene's own expert "
-                         "(stairs/flat force one side; single pins --policy)")
     ap.add_argument("--policy", default=None,
-                    help="ONNX pinned by --expert single "
-                         "(default: the scene's expert)")
+                    help="ONNX to drive the body (default: go2's registry "
+                         "perception policy, sim/robots.py)")
     ap.add_argument("--depth", default="mesh",
                     choices=["mesh", "stereo", "splat"],
                     help="contract face depth: mesh = mujoco collision-world "
@@ -209,7 +204,7 @@ def main() -> int:
     import mujoco  # noqa: E402
     from sim.plant import build_model, get_scene, reset_to_spawn
     from sim.policy import PieOnnxPolicy
-    from sim.expert import DualExpertPolicy
+    from sim.robots import get_robot
     from sim.runtime import DepthCamera, PieRuntime
 
     profile = get_profile(args.profile)
@@ -236,18 +231,9 @@ def main() -> int:
     data = mujoco.MjData(model)
     reset_to_spawn(model, data, b, settle=True, pos=pos, yaw_deg=yaw_deg)
 
-    # Dual experts on stairs scenes (sim/expert.py): the scene's own veteran
-    # for forward/side commands, the flat omni net for backward. On the flat
-    # scene the primary IS the omni net -- a dual pair of the same file would
-    # only reset its GRU on every direction flip.
-    _flat = "policy_24000_flat_omni.onnx"
-    _primary = (Path(args.policy) if args.policy
-                else _HERE / "assets" / "policy" / sc.hil_policy)
-    if args.expert == "single" or sc.hil_policy == _flat:
-        policy = PieOnnxPolicy(_primary, provider="cpu")
-    else:
-        policy = DualExpertPolicy(_primary, _HERE / "assets" / "policy" / _flat,
-                                  mode=args.expert, provider="cpu")
+    policy = PieOnnxPolicy(Path(args.policy) if args.policy
+                           else get_robot("go2").policy_path("perception"),
+                           provider="cpu")
     policy_cam = DepthCamera(model, b.depth_camera_id)
 
     keys = {"reset": False, "stop": False}
@@ -366,9 +352,6 @@ def main() -> int:
                 print("[RESET] back to spawn", flush=True)
             now = time.perf_counter()
             if now >= next_ctrl:
-                sel = getattr(policy, "select", None)
-                if sel is not None:
-                    sel(float(cmd_source.vector()[0]))
                 rt.tick()
                 next_ctrl = max(next_ctrl + CONTROL_DT, time.perf_counter())
                 root = b.root_qpos_adr

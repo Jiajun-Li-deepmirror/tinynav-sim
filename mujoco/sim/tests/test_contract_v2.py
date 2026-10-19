@@ -81,8 +81,9 @@ class TestStudentContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             V.contract_for({**wheeled_metadata(), "contract": "dog_v9"})
 
-    def test_pie_has_no_contract_key(self):
-        self.assertIsInstance(V.contract_for({}), V.PieContract)
+    def test_exports_without_contract_are_refused(self):
+        with self.assertRaises(ValueError):    # e.g. the retired PIE policies
+            V.contract_for({})
 
 
 if __name__ == "__main__":

@@ -134,7 +134,8 @@ class PieRuntime:
         meta = getattr(self.policy, "metadata", {})
         gains = {key: [float(v) for v in meta[key].split(",")]
                  for key in ("joint_stiffness", "joint_damping") if key in meta}
-        # (actuator ids, slice of the action vector, scale, default or None)
+        # (actuator ids, slice of the action vector, scale, default or None,
+        # joint dof addresses)
         self._action_map = []
         start = 0
         for group in k.action_groups:
@@ -143,7 +144,8 @@ class PieRuntime:
             stop = start + len(ids)
             offset = default[jidx] if group.kind == "position" else None
             self._action_map.append((ids, slice(start, stop),
-                                     np.float32(group.scale), offset))
+                                     np.float32(group.scale), offset,
+                                     self._dof_adr[jidx]))
             start = stop
             if group.kind == "position" and len(gains) == 2:
                 kp = np.asarray(gains["joint_stiffness"])[jidx]
@@ -244,12 +246,17 @@ class PieRuntime:
             self.depth_history.array if self.uses_depth else None,
         )
         self.policy_ms = (time.perf_counter() - t0) * 1e3
-        for ids, part, scale, offset in self._action_map:
+        brake = getattr(self.contract, "wheel_brake_rad_s", None)
+        for ids, part, scale, offset, dof in self._action_map:
             # position: default pose + scale * action; velocity: scale * action
             target = scale * action[part]
             if offset is not None:
                 target = np.clip(offset + target, offset - ACTION_CLIP_RAD,
                                  offset + ACTION_CLIP_RAD)
+            elif (brake is not None and not np.any(self.command)
+                  and np.all(np.abs(self.data.qvel[dof]) < brake)):
+                # Low-speed brake at a zero command, as in training.
+                target = np.zeros_like(target)
             if not np.all(np.isfinite(target)):
                 raise FloatingPointError("policy actuator target is non-finite")
             self.data.ctrl[ids] = target

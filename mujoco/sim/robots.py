@@ -118,13 +118,13 @@ ROBOTS: dict[str, Robot] = {
                  perception="as2_depth_v1.onnx"),
     "as2w": Robot("as2w", "AS2-W", (0.325, 0.0, 0.075), _CAMERA_QUAT,
                   spawn_drop=0.45, default_pose=_GO2_POSE,
-                  perception="as2w_depth_v1.onnx", wheeled=True),
+                  perception="as2w_depth_v2.onnx", wheeled=True),
     "b2": Robot("b2", "B2", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                 spawn_drop=0.467, default_pose=_B2_POSE,
                 perception="b2_depth_v1.onnx"),
     "b2w": Robot("b2w", "B2-W", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                  spawn_drop=0.60, default_pose=_B2_POSE,
-                 perception="b2w_depth_v1.onnx", wheeled=True),
+                 perception="b2w_depth_v2.onnx", wheeled=True),
 }
 DEFAULT_ROBOT = "go2"
 

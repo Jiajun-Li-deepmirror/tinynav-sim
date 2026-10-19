@@ -202,9 +202,11 @@ MSH + wheel）。深度相机安装位取训练值——**只有 Go2 是实测�
 wz ±1.5），按 I/O 签名识别。关节目标与真机部署一致地截在默认角 ±2.0 rad 内
 （训练时没有截断，正常运行几乎碰不到）。ONNX 元数据 `contract` 选契约
 （`sim/contract_v2.py`）：go2_depth_v2 与 {as2,b2}_depth_v1 为 47 维，
-{go2w,b2w,as2w}_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含
-全部 16 个、动作 = 12 腿位置目标 ×0.25 + 4 轮速度目标 ×10，见元数据
-`action_layout`）；runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
+go2w_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含全部 16 个、
+动作 = 12 腿位置目标 ×0.25 + 4 轮速度目标 ×10，见元数据 `action_layout`）；
+轮足 {go2w,b2w,as2w}_depth_v2 去掉步态相位（53 维，观测项以元数据
+`observation_names` 为准），并带低速刹车：指令为零且各轮都慢于元数据
+`wheel_brake_rad_s` 时，轮速目标置零（与训练一致）；runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
 直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1）、
 B2（b2_depth_v1）；其余机型训练中，网页里列为不可用并写明缺什么。
 

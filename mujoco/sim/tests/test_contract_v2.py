@@ -81,6 +81,19 @@ class TestStudentContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             V.contract_for({**wheeled_metadata(), "contract": "dog_v9"})
 
+    def test_blind_export_is_recognised_by_its_signature(self):
+        meta = {"joint_names": ",".join(LEGS),
+                "default_joint_pos": ",".join(f"{v:.3f}" for v in C.DEFAULT_JOINT_POS),
+                "action_scale": "0.25",
+                "observation_names": ",".join(V.OBSERVATION_NAMES)}
+        k = V.contract_for(meta, ["obs"])
+        self.assertIsInstance(k, V.BlindContract)
+        self.assertEqual((k.OBS_DIM, k.PROPRIO_HISTORY_DIM), (47, 470))
+        np.testing.assert_allclose(k.shape_command((2.0, -1.0, 2.0)), (1.5, -0.6, 1.5))
+        np.testing.assert_allclose(k.shape_command((0.1, 0.0, 0.0)), 0.0)   # <= 0.1
+        with self.assertRaises(ValueError):    # same metadata, student-style inputs
+            V.contract_for(meta, ["proprio", "proprio_history", "memory_h_in"])
+
     def test_exports_without_contract_are_refused(self):
         with self.assertRaises(ValueError):    # e.g. the retired PIE policies
             V.contract_for({})

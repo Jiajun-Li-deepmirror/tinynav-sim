@@ -24,6 +24,12 @@ import numpy as np
 from . import contract as C
 from .plant import Bindings, reset_to_spawn
 
+# Joint-target safety clamp around the default pose, as the real-robot deploy
+# applies it (go2-blind deploy.yaml: default +- 2.0 rad = raw action +- 8).
+# Training had none and it bites on ~0.005% of steps; last_action stays the
+# raw policy output.
+ACTION_CLIP_RAD = 2.0
+
 
 class DepthCamera:
     """Native MuJoCo optical-Z renderer matching the raw PIE camera."""
@@ -242,7 +248,8 @@ class PieRuntime:
             # position: default pose + scale * action; velocity: scale * action
             target = scale * action[part]
             if offset is not None:
-                target = offset + target
+                target = np.clip(offset + target, offset - ACTION_CLIP_RAD,
+                                 offset + ACTION_CLIP_RAD)
             if not np.all(np.isfinite(target)):
                 raise FloatingPointError("policy actuator target is non-finite")
             self.data.ctrl[ids] = target

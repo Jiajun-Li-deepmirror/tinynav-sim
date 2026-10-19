@@ -87,8 +87,10 @@ class PieOnnxPolicy:
     export's, hence the class name); `self.contract` is the contract object
     the runtime builds observations and actuator targets with. A policy
     without a depth_history input is blind: `uses_depth` is False and the
-    runtime skips the depth camera. The runtime checks joints, default pose
-    and PD gains against the robot it drives.
+    runtime skips the depth camera. Blind exports (BlindContract: one `obs`
+    input = the proprio history, `actions` out, no memory) run here too. The
+    runtime checks joints, default pose and PD gains against the robot it
+    drives.
     """
 
     def __init__(self, path: Path, provider: str = "auto") -> None:
@@ -126,20 +128,24 @@ class PieOnnxPolicy:
             str(self.path), sess_options=options, providers=providers
         )
         self.metadata = dict(self.session.get_modelmeta().custom_metadata_map)
-        self.contract = contract_for(self.metadata)
-        self.uses_depth = any(value.name == "depth_history"
-                              for value in self.session.get_inputs())
-        self.INPUT_SHAPES = {
-            "proprio": (1, self.contract.OBS_DIM),
-            "proprio_history": (1, self.contract.PROPRIO_HISTORY_DIM),
-            "memory_h_in": (1, 1, 128),
-        }
+        input_names = [value.name for value in self.session.get_inputs()]
+        self.contract = contract_for(self.metadata, input_names)
+        self.uses_depth = "depth_history" in input_names
+        # Blind exports: the history is the only input and there is no GRU.
+        self.recurrent = "memory_h_in" in input_names
+        if input_names == ["obs"]:
+            self.INPUT_SHAPES = {"obs": (1, self.contract.PROPRIO_HISTORY_DIM)}
+        else:
+            self.INPUT_SHAPES = {
+                "proprio": (1, self.contract.OBS_DIM),
+                "proprio_history": (1, self.contract.PROPRIO_HISTORY_DIM),
+                "memory_h_in": (1, 1, 128),
+            }
         if self.uses_depth:
             self.INPUT_SHAPES["depth_history"] = (1, *DEPTH_HISTORY_SHAPE)
-        self.OUTPUT_SHAPES = {
-            "actions": (1, self.contract.NUM_ACTIONS),
-            "memory_h_out": (1, 1, 128),
-        }
+        self.OUTPUT_SHAPES = {"actions": (1, self.contract.NUM_ACTIONS)}
+        if self.recurrent:
+            self.OUTPUT_SHAPES["memory_h_out"] = (1, 1, 128)
         self._validate_contract()
         self.reset()
 
@@ -187,13 +193,21 @@ class PieOnnxPolicy:
         proprio_history: np.ndarray,
         depth_history: np.ndarray,
     ) -> np.ndarray:
+        history = np.asarray(proprio_history, dtype=np.float32).reshape(
+            1, self.contract.PROPRIO_HISTORY_DIM
+        )
+        if not self.recurrent:
+            action = np.asarray(self.session.run(["actions"], {"obs": history})[0],
+                                dtype=np.float32)
+            if action.shape != self.OUTPUT_SHAPES["actions"] or not np.all(
+                    np.isfinite(action)):
+                raise FloatingPointError(f"Blind policy output invalid: {action.shape}.")
+            return action.reshape(self.contract.NUM_ACTIONS)
         inputs = {
             "proprio": np.asarray(proprio, dtype=np.float32).reshape(
                 1, self.contract.OBS_DIM
             ),
-            "proprio_history": np.asarray(proprio_history, dtype=np.float32).reshape(
-                1, self.contract.PROPRIO_HISTORY_DIM
-            ),
+            "proprio_history": history,
             "memory_h_in": self.memory_h,
         }
         if self.uses_depth:
@@ -207,7 +221,7 @@ class PieOnnxPolicy:
         if memory_h.shape != self.OUTPUT_SHAPES["memory_h_out"]:
             raise ValueError(f"Policy memory has invalid shape {memory_h.shape}.")
         if not np.all(np.isfinite(action)) or not np.all(np.isfinite(memory_h)):
-            raise FloatingPointError("PIE policy produced NaN or infinity.")
+            raise FloatingPointError("Policy produced NaN or infinity.")
         self.memory_h = memory_h
         return action.reshape(self.contract.NUM_ACTIONS)
 

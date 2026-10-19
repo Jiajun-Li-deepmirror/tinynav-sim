@@ -109,7 +109,7 @@ class Robot:
 ROBOTS: dict[str, Robot] = {
     "go2": Robot("go2", "Go2", *_GO2_CAMERA, spawn_drop=0.30,
                  default_pose=_GO2_POSE, perception="go2_depth_v2.onnx",
-                 pie_plant=True),
+                 blind="go2_blind_v0.onnx", pie_plant=True),
     "go2w": Robot("go2w", "Go2-W", *_GO2_CAMERA, spawn_drop=0.40,
                   default_pose=_GO2_POSE, perception="go2w_depth_v1.onnx",
                   wheeled=True),

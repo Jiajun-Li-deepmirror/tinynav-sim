@@ -1,4 +1,4 @@
-"""Policy contracts of the depth-student family.
+"""Policy contracts of the depth-student family and the blind policies.
 
 unitree_rl_mjlab Unitree-<Robot>-Depth-Student exports, one per robot:
 go2_depth_v2 (Go2), as2_depth_v1 / b2_depth_v1 (legged) and go2w_depth_v1 /
@@ -19,8 +19,15 @@ position-controlled at scale 0.25.
 
 phase = (sin, cos)(2 pi * t / 0.6 s), t = control_step * CONTROL_DT counted
 from the last reset, and zero while |command| < 0.1 (training also zeroes
-commands below that norm, so the same deadzone is applied to the command).
+commands up to that norm, so the same deadzone is applied to the command).
 Mirrors unitree_rl_mjlab src/tasks/velocity/mdp/observations.py::phase.
+
+BlindContract: unitree_rl_mjlab Unitree-Go2-Blind exports (blind_v0, branch
+go2-blind). Same 47-D observation, no depth, no recurrent memory: the ONNX
+takes one `obs` input that IS the 10-frame term-major history (oldest
+first, reset backfilled -- TermHistory) and returns `actions`; its command
+envelope is the blind joystick range (deploy.yaml scale_to_range). Its
+exports carry no "contract" key and are recognised by that I/O signature.
 """
 
 from __future__ import annotations
@@ -58,6 +65,9 @@ COMMAND_DEADZONE = 0.1
 # robots).
 COMMAND_LOW = np.asarray((-0.5, -0.5, -1.2), dtype=np.float32)
 COMMAND_HIGH = np.asarray((1.0, 0.5, 1.2), dtype=np.float32)
+# Blind joystick envelope (go2-blind deploy.yaml command ranges).
+BLIND_COMMAND_LOW = np.asarray((-1.0, -0.6, -1.5), dtype=np.float32)
+BLIND_COMMAND_HIGH = np.asarray((1.5, 0.6, 1.5), dtype=np.float32)
 
 
 @dataclass(frozen=True)
@@ -140,9 +150,10 @@ def _floats(metadata: dict[str, str], key: str) -> np.ndarray:
 class StudentContract:
     """Depth-student observation/action contract, built from ONNX metadata."""
 
-    def __init__(self, metadata: dict[str, str]) -> None:
-        self.name = metadata["contract"]
-        if self.name not in STUDENT_CONTRACTS:
+    def __init__(self, metadata: dict[str, str], name: str | None = None,
+                 command_low=COMMAND_LOW, command_high=COMMAND_HIGH) -> None:
+        self.name = name or metadata["contract"]
+        if name is None and self.name not in STUDENT_CONTRACTS:
             raise ValueError(f"Unknown ONNX policy contract {self.name!r}.")
         self.joint_names = tuple(metadata.get("joint_names", "").split(","))
         self.default_joint_pos = _floats(metadata, "default_joint_pos")
@@ -170,7 +181,8 @@ class StudentContract:
                                       len(self.joint_names), self.NUM_ACTIONS)
         self.OBS_DIM = sum(self.OBSERVATION_TERM_DIMS)
         self.PROPRIO_HISTORY_DIM = self.OBS_DIM * PROPRIO_HISTORY_LENGTH
-        self.COMMAND_LOW, self.COMMAND_HIGH = COMMAND_LOW, COMMAND_HIGH
+        self.COMMAND_LOW = np.asarray(command_low, dtype=np.float32)
+        self.COMMAND_HIGH = np.asarray(command_high, dtype=np.float32)
 
     def ProprioHistory(self) -> TermHistory:  # noqa: N802 -- contract surface
         return TermHistory(self.OBSERVATION_TERM_DIMS)
@@ -178,8 +190,9 @@ class StudentContract:
     def shape_command(self, command: Sequence[float]) -> np.ndarray:
         """Clip to the training envelope and apply the training deadzone."""
         cmd = np.clip(np.asarray(command, dtype=np.float32).reshape(3),
-                      COMMAND_LOW, COMMAND_HIGH)
-        if float(np.linalg.norm(cmd)) < COMMAND_DEADZONE:
+                      self.COMMAND_LOW, self.COMMAND_HIGH)
+        # float32 on both sides, as torch compares the command tensor
+        if np.linalg.norm(cmd) <= np.float32(COMMAND_DEADZONE):
             cmd[:] = 0.0
         return cmd
 
@@ -214,17 +227,34 @@ class StudentContract:
         return np.ascontiguousarray(observation)
 
 
-def contract_for(metadata: dict[str, str]) -> StudentContract:
-    """ONNX metadata -> contract object; exports without a "contract" key
-    (e.g. the retired PIE policies) are refused."""
-    if "contract" not in metadata:
-        raise ValueError("ONNX metadata has no 'contract': not a depth-student "
-                         f"export (known: {', '.join(STUDENT_CONTRACTS)}).")
-    return StudentContract(metadata)
+class BlindContract(StudentContract):
+    """Blind policy (Unitree-Go2-Blind export): the student observation with
+    the blind joystick envelope."""
+
+    def __init__(self, metadata: dict[str, str]) -> None:
+        super().__init__(metadata, name="blind", command_low=BLIND_COMMAND_LOW,
+                         command_high=BLIND_COMMAND_HIGH)
+
+
+def contract_for(metadata: dict[str, str],
+                 input_names: Sequence[str] = ()) -> StudentContract:
+    """ONNX metadata (+ input names) -> contract object. Depth students name
+    their contract; blind exports are the single-`obs` signature with the
+    student observation terms; anything else (e.g. the retired PIE
+    policies) is refused."""
+    if "contract" in metadata:
+        return StudentContract(metadata)
+    if (tuple(input_names) == ("obs",)
+            and metadata.get("observation_names") == ",".join(OBSERVATION_NAMES)):
+        return BlindContract(metadata)
+    raise ValueError("ONNX is neither a depth-student export (metadata "
+                     f"'contract' in {', '.join(STUDENT_CONTRACTS)}) nor a "
+                     "blind export (single 'obs' input).")
 
 
 __all__ = [
     "ActionGroup",
+    "BlindContract",
     "COMMAND_HIGH",
     "COMMAND_LOW",
     "STUDENT_CONTRACTS",

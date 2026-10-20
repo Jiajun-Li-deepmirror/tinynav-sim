@@ -354,8 +354,9 @@ def main() -> int:
                 web_server.scene.reset()
                 scene = ViserMujocoScene(web_server, world.model, num_envs=1)
                 # "Track camera" force-aims every client at the world ORIGIN
-                # -- the dog lives at the spawn, so tracking off; the panel's
-                # follow camera frames it.
+                # -- the dog lives at the spawn, so tracking off (and with it
+                # the checkbox, webviewer/__init__.py); the panel's Track
+                # robot frames it.
                 scene.camera_tracking_enabled = False
                 scene.show_contact_points = True
                 # hulls render at 0.5 opacity over EVERY geom and read
@@ -374,7 +375,7 @@ def main() -> int:
             # the ACTUAL bound port, not the request.
             print(f"[WEBVIEWER] http://0.0.0.0:{web_server.get_port()}  "
                   f"(wall alpha={wall_alpha}, operator panel: robot/"
-                  "perception/gamepad/follow, Reset/Stop)", flush=True)
+                  "perception/gamepad/track robot, Reset/Stop)", flush=True)
         except Exception as exc:      # noqa: BLE001
             print(f"[WEBVIEWER] init failed: {exc}", flush=True)
             web_scene = panel = None

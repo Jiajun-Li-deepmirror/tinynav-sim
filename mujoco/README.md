@@ -205,15 +205,16 @@ wz ±1.5），按 I/O 签名识别。关节目标与真机部署一致地截在�
 {go2w,b2w,as2w}_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含
 全部 16 个、动作 = 12 腿位置目标 ×0.25 + 4 轮速度目标 ×10，见元数据
 `action_layout`）；runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
-直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1）；
+直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1），盲策略 Go2（go2_blind_v1）、AS2（as2_blind_v0）；
 其余机型训练中，网页里列为不可用并写明缺什么。
 
 | 机型 | 策略 | 状态 |
 |---|---|---|
 | go2 | go2_depth_v2.onnx（学生 t8 model_1999） | map3 全场景 0 摔（16 次 × 场景） |
-| go2（盲） | go2_blind_v0.onnx（go2-blind 发布版 model_20000） | map3 各场景 16 次 0 摔，上楼与中途停走 100%；下楼贴时限（L0 1.99/2.0 m、R2b 0.99/1.0 m）；平地横移 ≈ 93% |
+| go2（盲） | go2_blind_v1.onnx（go2-blind 外张微调 model_21499，着地腿外张 7.4° → 1.6°） | map3 各场景 16 次 0 摔、全部成功，下楼不再贴时限（L0 2.14 m、R2b 1.12 m）；平地前进 93%、横移 88%、后退 97% |
 | go2w | go2w_depth_v1.onnx（学生 model_7999） | 平地滚行、横移 ≈ 指令 43%（已知偏弱）；零指令会缓慢前蠕（平地 ~3 cm/s，梯口处停在边缘） |
 | as2 | as2_depth_v1.onnx（学生 model_7999） | map3 各场景 16 次 0 摔，上楼 100%；下楼偏慢（脚本时限内 L0 下 1.84/2.0 m、R2b 下 0.87/1.0 m） |
+| as2（盲） | as2_blind_v0.onnx（go2-blind As2 楼梯 model_7500） | map3 各场景 16 次 0 摔；走得比指令慢（go2-blind 测上楼约 0.88×），脚本时限内 L0 上 69%、R1 上 94%、L0 下 94%、R2b 下 69%、中途停走 100%，时长放宽 1.6 倍 L0 上 94%（1 次走完梯段后撞平台尽头的墙）、R2b 下 100%；平地前进 93%、横移 95%、后退 90% |
 | b2 / as2w / b2w | — | 训练中 |
 
 网页操作面板（`webpanel.py`，view/hil 共用，在页面右上角控制面板最上方）：

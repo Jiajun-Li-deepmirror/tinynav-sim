@@ -106,6 +106,8 @@ class PieRuntime:
         self._bind_contract()
         self.last_action = np.zeros(self.contract.NUM_ACTIONS, dtype=np.float32)
         self.proprio_history = self.contract.ProprioHistory()
+        # heading_error state (heading contracts; None otherwise)
+        self.heading = self.contract.HeadingError()
         self.depth_history = C.DepthHistory()
         self.control_step = 0
         self.latest_raw_depth = None
@@ -173,6 +175,8 @@ class PieRuntime:
         reset_to_spawn(self.model, self.data, self.b, settle=True)
         self.last_action.fill(0.0)
         self.proprio_history.reset()
+        if self.heading is not None:
+            self.heading.reset()
         self.depth_history.reset()
         self.policy.reset()
         self.control_step = 0
@@ -190,9 +194,12 @@ class PieRuntime:
         # Students: training command envelope + deadzone, and the gait phase
         # clock counted from the last reset (control_step). PIE: unshaped.
         self.command = self.contract.shape_command(command)
+        heading_error = (None if self.heading is None
+                         else self.heading(quaternion, self.command[2]))
         return self.contract.build_proprioception(
             angular_velocity, quaternion, self.command,
             joint_pos, joint_vel, self.last_action, self.control_step,
+            heading_error=heading_error,
         )
 
     def depth_frame(self) -> np.ndarray | None:
@@ -211,6 +218,8 @@ class PieRuntime:
                        pos=self._spawn_pos, yaw_deg=self._spawn_yaw_deg)
         self.last_action.fill(0.0)
         self.proprio_history.reset()
+        if self.heading is not None:
+            self.heading.reset()
         self.depth_history.reset()
         self.policy.reset()
         self.control_step = 0

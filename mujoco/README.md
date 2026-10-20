@@ -206,7 +206,11 @@ go2w_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含全�
 动作 = 12 腿位置目标 ×0.25 + 4 轮速度目标 ×10，见元数据 `action_layout`）；
 轮足 {go2w,b2w,as2w}_depth_v2 去掉步态相位（53 维，观测项以元数据
 `observation_names` 为准），并带低速刹车：指令为零且各轮都慢于元数据
-`wheel_brake_rad_s` 时，轮速目标置零（与训练一致）；runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
+`wheel_brake_rad_s` 时，轮速目标置零（与训练一致）；航向学生（契约名为原契约加
+`_heading`，如 go2_depth_v2_heading）观测末尾多一维 heading_error：目标航向在复位后
+前两步取机体偏航，之后每个控制步积分整形后的 wz 指令，误差 = 目标 − 偏航（回绕到
+±π），限制在 ±0.5 rad（转不动时目标跟着机体，不累积），与训练和 go2-blind 部署一致；
+它们按 go2-blind 的指令包络训练（同盲策略）。runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
 直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1）、
 B2（b2_depth_v1），盲策略 Go2（go2_blind_v1）、AS2（as2_blind_v0）；其余机型训练中，网页里列为不可用并写明缺什么。
 

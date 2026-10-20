@@ -48,6 +48,31 @@ class TestStudentContract(unittest.TestCase):
         self.assertEqual((k.OBS_DIM, k.PROPRIO_HISTORY_DIM, k.NUM_ACTIONS),
                          (55, 550, 16))
 
+    def test_wheeled_v2_has_no_phase_and_a_brake(self):
+        meta = wheeled_metadata() | {
+            "contract": "go2w_depth_v2",
+            "observation_names": "base_ang_vel,projected_gravity,command,"
+                                 "joint_pos,joint_vel,actions",
+            "wheel_brake_rad_s": "1.16279",
+        }
+        k = V.StudentContract(meta)
+        self.assertEqual(k.OBSERVATION_TERM_DIMS, (3, 3, 3, 12, 16, 16))
+        self.assertEqual((k.OBS_DIM, k.PROPRIO_HISTORY_DIM), (53, 530))
+        self.assertAlmostEqual(k.wheel_brake_rad_s, 1.16279)
+        obs = k.build_proprioception(
+            np.zeros(3), (1.0, 0.0, 0.0, 0.0), np.array([0.5, 0.0, 0.0], np.float32),
+            k.default_joint_pos, np.zeros(16), np.zeros(16), control_step=7)
+        self.assertEqual(obs.shape, (53,))
+        np.testing.assert_allclose(obs[6:9], [0.5, 0.0, 0.0])   # command, then joint_pos
+        self.assertIsNone(V.StudentContract(wheeled_metadata()).wheel_brake_rad_s)
+
+    def test_observation_terms_out_of_order_are_refused(self):
+        meta = wheeled_metadata() | {
+            "observation_names": "projected_gravity,base_ang_vel,command,"
+                                 "joint_pos,joint_vel,actions"}
+        with self.assertRaises(ValueError):
+            V.StudentContract(meta)
+
     def test_legged_without_layout(self):
         meta = {"contract": "go2_depth_v2", "joint_names": ",".join(LEGS),
                 "default_joint_pos": ",".join(f"{v:.3f}" for v in C.DEFAULT_JOINT_POS),

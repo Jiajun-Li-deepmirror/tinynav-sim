@@ -1,14 +1,18 @@
 """Policy contracts of the depth-student family and the blind policies.
 
 unitree_rl_mjlab Unitree-<Robot>-Depth-Student exports, one per robot:
-go2_depth_v2 (Go2), as2_depth_v1 / b2_depth_v1 (legged) and go2w_depth_v1 /
-b2w_depth_v1 / as2w_depth_v1 (wheel-legged). Physics rate, depth camera and
-depth preprocessing are the PIE contract's (sim/contract.py, imported, not
-copied); joints, default pose and action layout come from the ONNX metadata,
-so one class serves every robot:
+go2_depth_v2 (Go2), as2_depth_v1 / b2_depth_v1 (legged), go2w_depth_v1
+(wheel-legged) and the wheel-legged *_depth_v2 (go2w / b2w / as2w: no phase,
+low-speed brake). Physics rate, depth camera and depth preprocessing are the
+PIE contract's (sim/contract.py, imported, not copied); joints, default
+pose, observation terms and action layout come from the ONNX metadata, so
+one class serves every robot:
 
     base_ang_vel(3) projected_gravity(3) command(3) phase(2)
     joint_pos(P) joint_vel(J) actions(A)
+
+in that order, minus the terms the metadata `observation_names` leaves out
+(the wheel-legged v2 exports have no phase: 53-D).
 
 J = metadata joint_names (every joint, model order), P = the position-
 controlled joints of action_layout (legs; relative to the default pose --
@@ -21,6 +25,11 @@ phase = (sin, cos)(2 pi * t / 0.6 s), t = control_step * CONTROL_DT counted
 from the last reset, and zero while |command| < 0.1 (training also zeroes
 commands up to that norm, so the same deadzone is applied to the command).
 Mirrors unitree_rl_mjlab src/tasks/velocity/mdp/observations.py::phase.
+
+Wheel brake (metadata `wheel_brake_rad_s`, wheel-legged v2): with the shaped
+command zero and every velocity-controlled joint slower than that, the
+velocity targets are zero (unitree_rl_mjlab mdp/wheel_action.py; applied by
+the runtime).
 
 BlindContract: unitree_rl_mjlab Unitree-{Go2,As2}-Blind exports (branch
 go2-blind). Same 47-D observation, no depth, no recurrent memory: the ONNX
@@ -46,8 +55,9 @@ STUDENT_CONTRACTS = (
     "as2_depth_v1",
     "b2_depth_v1",
     "go2w_depth_v1",
-    "b2w_depth_v1",
-    "as2w_depth_v1",
+    "go2w_depth_v2",
+    "b2w_depth_v2",
+    "as2w_depth_v2",
 )
 OBSERVATION_NAMES = (
     "base_ang_vel",
@@ -176,9 +186,17 @@ class StudentContract:
         self._pos_index = np.asarray(
             [self.joint_names.index(j) for j in self.position_joints])
         self.NUM_ACTIONS = sum(len(g.joints) for g in self.action_groups)
-        self.OBSERVATION_NAMES = OBSERVATION_NAMES
-        self.OBSERVATION_TERM_DIMS = (3, 3, 3, 2, len(self.position_joints),
-                                      len(self.joint_names), self.NUM_ACTIONS)
+        names = tuple(filter(None, metadata.get(
+            "observation_names", ",".join(OBSERVATION_NAMES)).split(",")))
+        if [n for n in OBSERVATION_NAMES if n in names] != list(names):
+            raise ValueError(f"Unsupported observation terms {names}.")
+        self.OBSERVATION_NAMES = names
+        dims = {"base_ang_vel": 3, "projected_gravity": 3, "command": 3,
+                "phase": 2, "joint_pos": len(self.position_joints),
+                "joint_vel": len(self.joint_names), "actions": self.NUM_ACTIONS}
+        self.OBSERVATION_TERM_DIMS = tuple(dims[n] for n in names)
+        brake = metadata.get("wheel_brake_rad_s")
+        self.wheel_brake_rad_s = float(brake) if brake else None
         self.OBS_DIM = sum(self.OBSERVATION_TERM_DIMS)
         self.PROPRIO_HISTORY_DIM = self.OBS_DIM * PROPRIO_HISTORY_LENGTH
         self.COMMAND_LOW = np.asarray(command_low, dtype=np.float32)
@@ -211,16 +229,19 @@ class StudentContract:
         cmd = np.asarray(command, dtype=np.float32).reshape(3)
         rel = (np.asarray(joint_pos, dtype=np.float32).reshape(-1)
                - self.default_joint_pos)
-        values = (
-            np.asarray(base_ang_vel, dtype=np.float32).reshape(3),
-            projected_gravity(quaternion_wxyz),
-            cmd,
-            phase(control_step, cmd),
-            rel[self._pos_index],
-            np.asarray(joint_vel, dtype=np.float32).reshape(len(self.joint_names)),
-            np.asarray(last_action, dtype=np.float32).reshape(self.NUM_ACTIONS),
-        )
-        observation = np.concatenate(values).astype(np.float32, copy=False)
+        values = {
+            "base_ang_vel": np.asarray(base_ang_vel, dtype=np.float32).reshape(3),
+            "projected_gravity": projected_gravity(quaternion_wxyz),
+            "command": cmd,
+            "phase": phase(control_step, cmd),
+            "joint_pos": rel[self._pos_index],
+            "joint_vel": np.asarray(joint_vel, dtype=np.float32).reshape(
+                len(self.joint_names)),
+            "actions": np.asarray(last_action, dtype=np.float32).reshape(
+                self.NUM_ACTIONS),
+        }
+        observation = np.concatenate(
+            [values[n] for n in self.OBSERVATION_NAMES]).astype(np.float32, copy=False)
         if observation.shape != (self.OBS_DIM,) or not np.all(np.isfinite(observation)):
             raise FloatingPointError(
                 f"Invalid {self.name} proprioception with shape {observation.shape}.")

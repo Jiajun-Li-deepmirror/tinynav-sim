@@ -202,11 +202,13 @@ MSH + wheel）。深度相机安装位取训练值——**只有 Go2 是实测�
 wz ±1.5），按 I/O 签名识别。关节目标与真机部署一致地截在默认角 ±2.0 rad 内
 （训练时没有截断，正常运行几乎碰不到）。ONNX 元数据 `contract` 选契约
 （`sim/contract_v2.py`）：go2_depth_v2 与 {as2,b2}_depth_v1 为 47 维，
-{go2w,b2w,as2w}_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含
-全部 16 个、动作 = 12 腿位置目标 ×0.25 + 4 轮速度目标 ×10，见元数据
-`action_layout`）；runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
-直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1），盲策略 Go2（go2_blind_v1）、AS2（as2_blind_v0）；
-其余机型训练中，网页里列为不可用并写明缺什么。
+go2w_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含全部 16 个、
+动作 = 12 腿位置目标 ×0.25 + 4 轮速度目标 ×10，见元数据 `action_layout`）；
+轮足 {go2w,b2w,as2w}_depth_v2 去掉步态相位（53 维，观测项以元数据
+`observation_names` 为准），并带低速刹车：指令为零且各轮都慢于元数据
+`wheel_brake_rad_s` 时，轮速目标置零（与训练一致）；runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
+直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1）、
+B2（b2_depth_v1），盲策略 Go2（go2_blind_v1）、AS2（as2_blind_v0）；其余机型训练中，网页里列为不可用并写明缺什么。
 
 | 机型 | 策略 | 状态 |
 |---|---|---|
@@ -215,7 +217,8 @@ wz ±1.5），按 I/O 签名识别。关节目标与真机部署一致地截在�
 | go2w | go2w_depth_v1.onnx（学生 model_7999） | 平地滚行、横移 ≈ 指令 43%（已知偏弱）；零指令会缓慢前蠕（平地 ~3 cm/s，梯口处停在边缘） |
 | as2 | as2_depth_v1.onnx（学生 model_7999） | map3 各场景 16 次 0 摔，上楼 100%；下楼偏慢（脚本时限内 L0 下 1.84/2.0 m、R2b 下 0.87/1.0 m） |
 | as2（盲） | as2_blind_v0.onnx（go2-blind As2 楼梯 model_7500） | map3 各场景 16 次 0 摔；走得比指令慢（go2-blind 测上楼约 0.88×），脚本时限内 L0 上 69%、R1 上 94%、L0 下 94%、R2b 下 69%、中途停走 100%，时长放宽 1.6 倍 L0 上 94%（1 次走完梯段后撞平台尽头的墙）、R2b 下 100%；平地前进 93%、横移 95%、后退 90% |
-| b2 / as2w / b2w | — | 训练中 |
+| b2 | b2_depth_v1.onnx（学生 model_7999） | map3 各场景 16 次 0 摔，上楼、L0 下楼与中途停走 100%，R2b 下楼 88%（平均 1.09/1.0 m）；平地横移 ≈ 指令 85–92% |
+| as2w / b2w | — | 训练中 |
 
 网页操作面板（`webpanel.py`，view/hil 共用，在页面右上角控制面板最上方）：
 

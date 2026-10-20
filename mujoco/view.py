@@ -244,7 +244,8 @@ class World:
             self.cam.close()
 
     def pad_envelope(self):
-        """Gamepad full deflection = the policy's training command envelope."""
+        """Gamepad full deflection (and the keyboard's range) = the policy's
+        training command envelope."""
         return self.policy.contract.COMMAND_LOW, self.policy.contract.COMMAND_HIGH
 
 
@@ -282,6 +283,7 @@ def main() -> int:
                   policy_path=policy_path,
                   wall_alpha=wall_alpha if view_mode == "web" else 1.0)
     pad.set_envelope(*world.pad_envelope())
+    kb.set_envelope(*world.pad_envelope())
 
     # wgpu splat pipeline (--preview only, its one consumer): static scene
     # only, exactly like hil -- GaussianCloud.from_ply -> RAW INRIA values
@@ -348,7 +350,7 @@ def main() -> int:
                 kb.key({"reset": 82, "stop": 32}[name])
 
             panel = OperatorPanel(web_server, ROBOTS, world.robot.name,
-                                  gamepad=pad, on_button=_on_button)
+                                  gamepad=pad, keyboard=kb, on_button=_on_button)
 
             def _build_web_scene():
                 web_server.scene.reset()
@@ -414,6 +416,7 @@ def main() -> int:
                 client.add_notification(title="Switch refused", body=str(exc),
                                         auto_close_seconds=8.0)
         pad.set_envelope(*world.pad_envelope())
+        kb.set_envelope(*world.pad_envelope())
         panel.show_robot(world.robot.name, world.kind == "perception",
                          world.robot.has_policy("perception"),
                          world.robot.has_policy("blind"))

@@ -318,8 +318,11 @@ class StudentContract:
 
 
 class BlindContract(StudentContract):
-    """Blind policy (Unitree-{Go2,As2}-Blind export): the student observation
-    with the blind joystick envelope."""
+    """Blind policy (go2-blind Unitree-<Robot>-Blind exports): the student
+    observation with the blind joystick envelope. The wheel-legged ones have
+    no phase and come through mujoco/scripts/import_blind_policy.py, which
+    writes their policy joint order, action layout and brake into the
+    metadata."""
 
     def __init__(self, metadata: dict[str, str]) -> None:
         super().__init__(metadata, name="blind", command_low=BLIND_COMMAND_LOW,
@@ -334,10 +337,12 @@ def contract_for(metadata: dict[str, str],
     policies) is refused."""
     if "contract" in metadata:
         return StudentContract(metadata)
+    no_phase = tuple(n for n in OBSERVATION_NAMES if n != "phase")
     if (tuple(input_names) == ("obs",)
-            and metadata.get("observation_names") in (
-                ",".join(OBSERVATION_NAMES),
-                ",".join(OBSERVATION_NAMES + (HEADING_TERM,)))):
+            and metadata.get("observation_names") in tuple(
+                ",".join(names + extra)
+                for names in (OBSERVATION_NAMES, no_phase)
+                for extra in ((), (HEADING_TERM,)))):
         return BlindContract(metadata)
     raise ValueError("ONNX is neither a depth-student export (metadata "
                      f"'contract' in {', '.join(STUDENT_CONTRACTS + HEADING_CONTRACTS)}) "

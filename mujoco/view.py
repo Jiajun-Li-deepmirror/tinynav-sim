@@ -256,8 +256,10 @@ def main() -> int:
     sc = get_scene(scene_name)
     spawn = _argv_value("--spawn", sc.default_spawn)
     robot_name = _argv_value("--robot", DEFAULT_ROBOT)
-    get_robot(robot_name)
     kind = "blind" if "--blind" in sys.argv else "perception"
+    if not get_robot(robot_name).has_policy(kind):
+        # Same fallback as switching robots in the panel.
+        kind = "blind" if kind == "perception" else "perception"
     policy_path = _argv_value("--policy", None)
     view_mode = _argv_value("--view", "web")    # web | glfw
     web_port = int(_argv_value("--web-port", "8012"))

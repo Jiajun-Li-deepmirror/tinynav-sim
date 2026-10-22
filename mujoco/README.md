@@ -223,25 +223,28 @@ as2_depth_v1_heading、b2_depth_v1_heading（下楼约 3× / 4.5× 指令）留�
 
 | 机型 | 感知策略 | 状态 |
 |---|---|---|
-| go2 | go2_depth_v2_heading.onnx（model_6500） | map3 18 段到达 97.0% / 97.6%；平地 0.5 → 0.51 m/s；R2b 下楼 0.4 → 0.57 m/s |
-| go2w | go2w_depth_v2_heading.onnx（model_7000） | map3 18 段 99.4%，上楼 1.13×、下楼 0.97× 指令速度；平地 0.5 → 0.56 m/s；R2b 下楼 0.4 → 0.39 m/s；梯上停 4 s 溜车 ≤ 2 cm（上楼途中）/ ≤ 11 cm（下楼途中） |
-| as2 | as2_depth_v1_heading_cap.onnx（heading_cap model_1999） | map3 18 段 92.4% / 93.9%（2 倍时限 100%），上楼 0.96×、下楼 0.91× 指令速度；平地 0.5 → 0.52 m/s；R2b 下楼 0.4 → 0.37 m/s |
-| as2w | as2w_depth_v2_heading.onnx（model_7000） | map3 18 段 99.8% / 99.8%，下楼 0.97×；平地 0.5 → 0.52 m/s；R2b 下楼 0.4 → 0.40 m/s；梯上停 4 s：上楼途中最多溜回一级（17 cm），下楼途中 ≤ 1 cm |
-| b2 | b2_depth_v1_heading_cap.onnx（heading_cap model_1000） | map3 18 段 96.2% / 96.7%（2 倍时限 99.8%），上楼 1.02×、下楼 0.94× 指令速度；平地 0.5 → 0.54 m/s；R2b 下楼 0.4 → 0.40 m/s |
-| b2w | b2w_depth_v2_heading.onnx（model_7000） | map3 18 段 100%，上楼 1.20×、下楼 1.00×；平地 0.5 → 0.59 m/s（偏快约 20%）；R2b 下楼 0.4 → 0.42 m/s；梯上停 4 s 溜车 ≤ 12 cm（上）/ ≤ 4 cm（下） |
+| go2 | go2_depth_v2_heading.onnx（model_6500） | map3 18 段到达 98.7% / 98.5%（1.25 倍时限 97.0% / 97.6%），上楼 1.08×、下楼 1.97× 指令速度；平地 0.5 → 0.51 m/s；R2b 下楼 0.4 → 0.57 m/s |
+| go2w | go2w_depth_v2_heading.onnx（model_7000） | map3 18 段 99.2% / 99.3%（1.25 倍时限无操作员 99.4%），上楼 1.13×、下楼 0.97× 指令速度；平地 0.5 → 0.56 m/s；R2b 下楼 0.4 → 0.39 m/s；梯上停 4 s 溜车 ≤ 2 cm（上楼途中）/ ≤ 11 cm（下楼途中） |
+| as2 | as2_depth_v1_heading_cap.onnx（heading_cap model_1999） | map3 18 段 100% / 99.9%（1.25 倍时限 92.4% / 93.9%），上楼 0.96×、下楼 0.91× 指令速度；平地 0.5 → 0.52 m/s；R2b 下楼 0.4 → 0.37 m/s |
+| as2w | as2w_depth_v2_heading.onnx（model_7000） | map3 18 段 99.7% / 99.8%（1.25 倍时限 99.8% / 99.8%），上楼 1.13×、下楼 0.97× 指令速度；平地 0.5 → 0.52 m/s；R2b 下楼 0.4 → 0.40 m/s；梯上停 4 s：上楼途中最多溜回一级（17 cm），下楼途中 ≤ 1 cm |
+| b2 | b2_depth_v1_heading_cap.onnx（heading_cap model_1000） | map3 18 段 100% / 100%（1.25 倍时限 96.2% / 96.7%），上楼 1.02×、下楼 0.94× 指令速度；平地 0.5 → 0.54 m/s；R2b 下楼 0.4 → 0.40 m/s |
+| b2w | b2w_depth_v2_heading.onnx（model_7000） | map3 18 段 100% / 100%（1.25 倍时限无操作员 100%），上楼 1.20×、下楼 1.00× 指令速度；平地 0.5 → 0.59 m/s（偏快约 20%）；R2b 下楼 0.4 → 0.42 m/s；梯上停 4 s 溜车 ≤ 12 cm（上）/ ≤ 4 cm（下） |
 
 map3 18 段 = unitree_rl_mjlab `scripts/go2_depth/eval_map3.py --set flights`（go2-blind 的
-18 段上下楼，每段 64 台，上楼指令 0.5、下楼 0.4 m/s，在按指令速度走完所需时间的
-1.25 倍内爬升或下降到梯段高度的 85% 算到达），斜线前后为无 / 有操作员（扶航向、回中线）。
-as2、b2 按指令速度走，1.25 倍时限里偏慢的会超时；括号里是时限放宽到 2 倍的到达率
-（`--time-slack 2.0`，无操作员，unitree_rl_mjlab 617d769），限速前的 model_7000 两台都是 99.6%。
+18 段上下楼，每段 64 台，限时内爬升或下降到梯段高度的 85%、且此前没摔算到达），按 go2-blind
+的验收设置测：时限是按指令速度走完所需时间的 2 倍（`--time-slack 2.0`，即 go2-blind
+`scripts/go2_blind/eval_map3.py --time-scale 1.6`；unitree_rl_mjlab 617d769）；斜线前后为
+无 / 有操作员（扶航向、回中线），无操作员时上下楼指令都是 0.5 m/s（`--no-operator --down-vx 0.5`），
+有操作员时上楼 0.5、下楼 0.4 m/s。括号里是 1.25 倍时限、上楼 0.5 / 下楼 0.4 m/s 的到达率：
+as2、b2 按指令速度走，偏慢的在 1.25 倍时限里会超时。到达之后的摔倒不计（2 倍时限走得更远，
+as2w 无操作员有 3.4% 走过梯段后撞上尽头的墙）。速度倍数取上楼 0.5、下楼 0.4 m/s 时。
 其余数字为本仓 smoke.py（flat、down = R2b 8 级）与梯上停车测试，均 0 摔。
 
 盲策略（go2-blind 4fc13b4 deploy/robots/<robot>/config/policy/velocity/blind_v0）：
 go2_blind_v2（Go2 model_23400）、go2w_blind_v0（9497）、as2_blind_v1（9500）、
 as2w_blind_v0（8200）、b2_blind_v0（8999）、b2w_blind_v0（8700）；smoke flat / down / map3
-均 0 摔。go2-blind 自测 map3 18 段（无 / 有操作员）：Go2 87.4 / 95.1%、As2 85.3 / 99.9%、
-B2 93.3 / 95.1%、As2W 77–78 / 98–99%。
+均 0 摔。go2-blind 自测 map3 18 段（同上面的验收设置，无 / 有操作员）：Go2 87.4 / 95.1%、
+As2 85.3 / 99.9%、B2 93.3 / 95.1%、As2W 81.0 / 100.0%。
 
 网页操作面板（`webpanel.py`，view/hil 共用，在页面右上角控制面板最上方）：
 

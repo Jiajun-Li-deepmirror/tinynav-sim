@@ -110,27 +110,29 @@ class Robot:
 
 
 ROBOTS: dict[str, Robot] = {
-    # Plants: go2-blind's robot models (unitree_rl_mjlab export_sim_robot.py).
-    # The depth students of the old models are not driven on them; each robot
-    # gets its heading-recipe student when it is done (Go2 so far).
+    # Plants: go2-blind's robot models (unitree_rl_mjlab export_sim_robot.py),
+    # each driven by its heading-recipe depth student (the old models' students
+    # are not driven on them).
     "go2": Robot("go2", "Go2", *_GO2_CAMERA, spawn_drop=0.32,
                  default_pose=_GO2_POSE, perception="go2_depth_v2_heading.onnx",
                  blind="go2_blind_v2.onnx"),
     "go2w": Robot("go2w", "Go2-W", *_GO2_CAMERA, spawn_drop=0.43,
-                  default_pose=_WHEEL_POSE, blind="go2w_blind_v0.onnx",
-                  wheeled=True),
+                  default_pose=_WHEEL_POSE, perception="go2w_depth_v2_heading.onnx",
+                  blind="go2w_blind_v0.onnx", wheeled=True),
     "as2": Robot("as2", "AS2", (0.325, 0.0, 0.075), _CAMERA_QUAT,
                  spawn_drop=0.307, default_pose=_GO2_POSE,
-                 blind="as2_blind_v1.onnx"),
+                 perception="as2_depth_v1_heading.onnx", blind="as2_blind_v1.onnx"),
     "as2w": Robot("as2w", "AS2-W", (0.325, 0.0, 0.075), _CAMERA_QUAT,
                   spawn_drop=0.37, default_pose=_GO2_POSE,
-                  blind="as2w_blind_v0.onnx", wheeled=True),
+                  perception="as2w_depth_v2_heading.onnx", blind="as2w_blind_v0.onnx",
+                  wheeled=True),
     "b2": Robot("b2", "B2", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                 spawn_drop=0.53, default_pose=_B2_POSE,
-                blind="b2_blind_v0.onnx"),
+                perception="b2_depth_v1_heading.onnx", blind="b2_blind_v0.onnx"),
     "b2w": Robot("b2w", "B2-W", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                  spawn_drop=0.645, default_pose=_WHEEL_POSE,
-                 blind="b2w_blind_v0.onnx", wheeled=True),
+                 perception="b2w_depth_v2_heading.onnx", blind="b2w_blind_v0.onnx",
+                 wheeled=True),
 }
 DEFAULT_ROBOT = "go2"
 

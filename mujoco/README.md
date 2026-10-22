@@ -211,18 +211,30 @@ go2w_depth_v1 为 55 维（joint_pos 只含 12 个腿关节、joint_vel 含全�
 前两步取机体偏航，之后每个控制步积分整形后的 wz 指令，误差 = 目标 − 偏航（回绕到
 ±π），限制在 ±0.5 rad（转不动时目标跟着机体，不累积），与训练和 go2-blind 部署一致；
 它们按 go2-blind 的指令包络训练（同盲策略）。runtime 加载时按机体核对关节、默认姿态与 PD 增益，不匹配
-直接拒绝。现有策略：Go2（go2_depth_v2）、Go2-W（go2w_depth_v1）、AS2（as2_depth_v1）、
-B2（b2_depth_v1），盲策略 Go2（go2_blind_v1）、AS2（as2_blind_v0）；其余机型训练中，网页里列为不可用并写明缺什么。
+直接拒绝。现有策略：每台一个感知航向学生（unitree_rl_mjlab go2-depth 的 heading 配方，
+在 go2-blind 的机体上训练：腿足 48 维带步态相位，轮足 54 维）与 go2-blind 的盲策略。
+assets/policy/ 里旧机体的学生（go2_depth_v2、go2w_depth_v1、as2_depth_v1、b2_depth_v1）
+与旧盲策略（go2_blind_v1、as2_blind_v0）仍在，但不在注册表里：它们的机体已换掉。
 
-| 机型 | 策略 | 状态 |
+| 机型 | 感知策略 | 状态 |
 |---|---|---|
-| go2 | go2_depth_v2.onnx（学生 t8 model_1999） | map3 全场景 0 摔（16 次 × 场景） |
-| go2（盲） | go2_blind_v1.onnx（go2-blind 外张微调 model_21499，着地腿外张 7.4° → 1.6°） | map3 各场景 16 次 0 摔、全部成功，下楼不再贴时限（L0 2.14 m、R2b 1.12 m）；平地前进 93%、横移 88%、后退 97% |
-| go2w | go2w_depth_v1.onnx（学生 model_7999） | 平地滚行、横移 ≈ 指令 43%（已知偏弱）；零指令会缓慢前蠕（平地 ~3 cm/s，梯口处停在边缘） |
-| as2 | as2_depth_v1.onnx（学生 model_7999） | map3 各场景 16 次 0 摔，上楼 100%；下楼偏慢（脚本时限内 L0 下 1.84/2.0 m、R2b 下 0.87/1.0 m） |
-| as2（盲） | as2_blind_v0.onnx（go2-blind As2 楼梯 model_7500） | map3 各场景 16 次 0 摔；走得比指令慢（go2-blind 测上楼约 0.88×），脚本时限内 L0 上 69%、R1 上 94%、L0 下 94%、R2b 下 69%、中途停走 100%，时长放宽 1.6 倍 L0 上 94%（1 次走完梯段后撞平台尽头的墙）、R2b 下 100%；平地前进 93%、横移 95%、后退 90% |
-| b2 | b2_depth_v1.onnx（学生 model_7999） | map3 各场景 16 次 0 摔，上楼、L0 下楼与中途停走 100%，R2b 下楼 88%（平均 1.09/1.0 m）；平地横移 ≈ 指令 85–92% |
-| as2w / b2w | — | 训练中 |
+| go2 | go2_depth_v2_heading.onnx（model_6500） | map3 18 段到达 97.0% / 97.6%；平地 0.5 → 0.51 m/s；R2b 下楼 0.4 → 0.57 m/s |
+| go2w | go2w_depth_v2_heading.onnx（model_7000） | map3 18 段 99.4%，上楼 1.13×、下楼 0.97× 指令速度；平地 0.5 → 0.56 m/s；R2b 下楼 0.4 → 0.39 m/s；梯上停 4 s 溜车 ≤ 2 cm（上楼途中）/ ≤ 11 cm（下楼途中） |
+| as2 | as2_depth_v1_heading.onnx（model_7000） | map3 18 段 99.3% / 98.9%；下楼偏快（mjlab 下楼约 3× 指令，R2b 下楼 0.4 → 0.61 m/s），不摔；平地 0.5 → 0.51 m/s |
+| as2w | as2w_depth_v2_heading.onnx（model_7000） | map3 18 段 99.8% / 99.8%，下楼 0.97×；平地 0.5 → 0.52 m/s；R2b 下楼 0.4 → 0.40 m/s；梯上停 4 s：上楼途中最多溜回一级（17 cm），下楼途中 ≤ 1 cm |
+| b2 | b2_depth_v1_heading.onnx（model_7000） | map3 18 段 98.8% / 98.5%；下楼偏快（mjlab 下楼约 4.5× 指令，R2b 下楼 0.4 → 0.60 m/s），不摔；平地 0.5 → 0.48 m/s |
+| b2w | b2w_depth_v2_heading.onnx（model_7000） | map3 18 段 100%，上楼 1.20×、下楼 1.00×；平地 0.5 → 0.59 m/s（偏快约 20%）；R2b 下楼 0.4 → 0.42 m/s；梯上停 4 s 溜车 ≤ 12 cm（上）/ ≤ 4 cm（下） |
+
+map3 18 段 = unitree_rl_mjlab `scripts/go2_depth/eval_map3.py --set flights`（go2-blind 的
+18 段上下楼，每段 64 台，上楼指令 0.5、下楼 0.4 m/s，在按指令速度走完所需时间的
+1.25 倍内爬升或下降到梯段高度的 85% 算到达），斜线前后为无 / 有操作员（扶航向、回中线）。
+其余数字为本仓 smoke.py（flat、down = R2b 8 级）与梯上停车测试，均 0 摔。
+
+盲策略（go2-blind 4fc13b4 deploy/robots/<robot>/config/policy/velocity/blind_v0）：
+go2_blind_v2（Go2 model_23400）、go2w_blind_v0（9497）、as2_blind_v1（9500）、
+as2w_blind_v0（8200）、b2_blind_v0（8999）、b2w_blind_v0（8700）；smoke flat / down / map3
+均 0 摔。go2-blind 自测 map3 18 段（无 / 有操作员）：Go2 87.4 / 95.1%、As2 85.3 / 99.9%、
+B2 93.3 / 95.1%、As2W 77–78 / 98–99%。
 
 网页操作面板（`webpanel.py`，view/hil 共用，在页面右上角控制面板最上方）：
 

@@ -5,8 +5,8 @@ One entry per robot model. The body is a training MJCF
 (assets/<name>/<name>.xml, exported by the RL training repo with its
 actuators and collision setup -- see that file's header), its visual meshes
 are the decimated MSH set in the model/ asset bundle (model/<name>/assets).
-go2 is the exception and keeps the PIE plant (assets/go2/go2_pie.xml with the
-sim/contract.py actuators), which every Go2 policy here was validated on.
+The old PIE plant (assets/go2/go2_pie.xml with the sim/contract.py actuators,
+`pie_plant`) is no longer registered.
 
 Policies are ONNX files in assets/policy/: "perception" reads the front
 depth camera, "blind" runs on proprioception alone. A robot is selectable

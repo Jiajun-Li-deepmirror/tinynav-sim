@@ -53,7 +53,10 @@ mujoco/
 资产来源：**不入 git 的大资产统一走 `model/` 资产包**——把 `model.zip`
 解压到仓根即得（`model/splat/` = 场景，`model/go2/` = 减面网格；包内自带
 `VERSION.txt` 与 `MANIFEST.sha256`，解压后 `sha256sum -c MANIFEST.sha256`
-验包）。重打包：`bash mujoco/scripts/pack_model.sh`（自动重生成
+验包）。现在的机体要 2026-10-22 版的包（VERSION.txt 写明版本，2026-10-19 版的网格对不上）；
+已有旧包时可只换机体网格：删掉 model/ 下 go2 go2w as2 as2w b2 b2w 六个目录，再解压
+只含这六个目录与 VERSION.txt、MANIFEST.sha256 的小包，splat 不变。
+重打包：`bash mujoco/scripts/pack_model.sh`（自动重生成
 MANIFEST.sha256 再 zip，默认输出到仓外 `../model.zip`）。运行期查找链：
 环境变量 `ROBOT_ASSETS` → 仓内 `model/` → 旧
 `~/workspace/dm/robot-assets` checkout；mjsim 镜像把整个包烤在镜像内
@@ -185,14 +188,13 @@ yaw −11.5°——狗眼 0.45m 只有低采段渲染干净，**换出生点先 
 
 ## 机型、策略与网页操作面板
 
-机型注册表 `sim/robots.py`：go2（go2_pie.xml 机体，执行器常量取
-sim/contract.py，与训练一致）、go2w、as2、as2w、
-b2、b2w。后五个的 MJCF 是训练仓（unitree_rl_mjlab 分支 go2-depth）用
+机型注册表 `sim/robots.py`：go2、go2w、as2、as2w、b2、b2w，机体都是 go2-blind 的
+机器人模型：MJCF 是训练仓（unitree_rl_mjlab 分支 go2-depth）用
 `scripts/go2_depth/export_sim_robot.py` 导出的训练原样机体（执行器 PD /
-力矩上限 / armature、碰撞配置、轮子球形碰撞都在 XML 里，勿手改，改了重导）；
-视觉网格是 `scripts/decimate_mesh.py` 减面后的 MSH（open3d quadric 保 15%，
-同 go2），放 model/ 资产包 `model/<robot>/assets`（go2w 机体网格 = go2 的
-MSH + wheel）。深度相机安装位取训练值——**只有 Go2 是实测外参，其余机型是
+力矩上限 / armature、碰撞配置、轮子球形碰撞都在 XML 里，勿手改，改了重导；
+旧的 PIE 机体 go2_pie.xml 已不在注册表里）；视觉网格是同一次导出的网格经
+`scripts/decimate_mesh.py` 减面后的 MSH（open3d quadric 保 15%），放 model/ 资产包
+`model/<robot>/assets`。深度相机安装位取训练值——**只有 Go2 是实测外参，其余机型是
 按 Go2 方式放在头前的估计值**。场景与出生点通用，出生高度按机型
 （`spawn_drop`）。
 

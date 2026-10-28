@@ -199,5 +199,125 @@ class TestHeading(unittest.TestCase):
         self.assertEqual(h(yaw_quat(1.0), 1.0), 0.0)
 
 
+GO2_FEET = "0.193,0.142;0.193,-0.142;-0.193,0.142;-0.193,-0.142"
+
+
+class TestGaitClock(unittest.TestCase):
+    """go2-blind's speed clock (legged finals of 2026-10-27)."""
+
+    def speed_clock_metadata(self) -> dict[str, str]:
+        meta = heading_metadata()
+        del meta["contract"]
+        meta.update({"gait_period": "0.6", "gait_ref_speed": "0.8023",
+                     "gait_foot_xy": GO2_FEET, "gait_march": "1"})
+        return meta
+
+    def test_blind_export_with_a_speed_clock(self):
+        k = V.contract_for(self.speed_clock_metadata(), ["obs"])
+        self.assertIsInstance(k, V.BlindContract)
+        self.assertEqual((k.gait_period, k.gait_ref_speed, k.gait_march), (0.6, 0.8023, True))
+        self.assertEqual(k.gait_foot_xy.shape, (4, 2))
+        self.assertIsInstance(k.GaitClock(), V.GaitClock)
+        args = (np.zeros(3), yaw_quat(0.0), np.zeros(3), k.default_joint_pos,
+                np.zeros(12), np.zeros(12), 0)
+        with self.assertRaises(ValueError):    # the clock lives with the caller
+            k.build_proprioception(*args, heading_error=0.0)
+        obs = k.build_proprioception(*args, heading_error=0.0, gait_phase=(0.25, -0.5))
+        np.testing.assert_allclose(obs[9:11], (0.25, -0.5))
+        # fixed-clock exports keep phase(control_step)
+        self.assertIsNone(V.contract_for(heading_metadata()).GaitClock())
+
+    def test_period_shortens_above_the_reference_speed(self):
+        clock = V.GaitClock(0.6, 0.8, None)
+        np.testing.assert_allclose(clock((0.5, 0.0, 0.0)), (0.0, 1.0))  # 0 after reset
+        clock((0.5, 0.0, 0.0))
+        self.assertAlmostEqual(clock.value, 0.02 / 0.6)
+        clock((1.6, 0.0, 0.0))                                  # twice the reference
+        self.assertAlmostEqual(clock.value, 0.02 / 0.6 + 0.02 / 0.3)
+        phase = 2 * np.pi * (clock.value + 0.02 / 0.3)
+        np.testing.assert_allclose(clock((1.6, 0.0, 0.0)), (np.sin(phase), np.cos(phase)),
+                                   atol=1e-6)
+
+    def test_the_fastest_foot_sets_the_speed(self):
+        feet = [[float(v) for v in f.split(",")] for f in GO2_FEET.split(";")]
+        clock = V.GaitClock(0.6, 0.8023, feet)
+        # 0.8 m/s on a 0.8 m radius arc: the outer front foot at |(0.942, 0.193)|
+        self.assertAlmostEqual(clock.current_period((0.8, 0.0, 1.0)),
+                               0.6 * 0.8023 / np.hypot(0.8 + 0.142, 0.193))
+        # turning in place at 1.5 rad/s: |(0.213, 0.290)| = 0.36 < 0.8023
+        self.assertAlmostEqual(clock.current_period((0.0, 0.0, 1.5)), 0.6)
+
+    def test_standing_reads_zero_unless_marching(self):
+        clock = V.GaitClock(0.6, 0.8, None)
+        for _ in range(4):
+            np.testing.assert_allclose(clock((0.0, 0.0, 0.0)), 0.0)
+        self.assertAlmostEqual(clock.value, 3 * 0.02 / 0.6)    # it keeps running
+        self.assertGreater(abs(clock((0.0, 0.0, 0.0), march=True)).max(), 0.5)
+        clock.reset()
+        self.assertEqual(clock.value, 0.0)
+        np.testing.assert_allclose(clock((0.0, 0.0, 0.0), march=True), (0.0, 1.0))
+
+
+NAVCORE_META = {"depth_camera": "navcore", "depth_camera_body": "base_link",
+                "depth_camera_pos": "0.307,0.05,0.1273",
+                "depth_camera_quat": "0.5,0.5,-0.5,-0.5",
+                "depth_focal_px": "38.76874999999999", "depth_kind": "optical_z",
+                "depth_max_m": "3.0", "depth_size": "68,80"}
+
+
+class TestNavcoreDepth(unittest.TestCase):
+    """go2-blind's legged finals' students (go2_depth_v3, 2026-10-27): navcore's
+    80x68 optical-Z frame, its mount from the metadata."""
+
+    def v3_metadata(self) -> dict[str, str]:
+        meta = heading_metadata("go2_depth_v3")
+        meta.update({"gait_period": "0.6", "gait_ref_speed": "0.8023",
+                     "gait_foot_xy": GO2_FEET, "gait_march": "1"} | NAVCORE_META)
+        return meta
+
+    def test_v3_student(self):
+        k = V.contract_for(self.v3_metadata())
+        self.assertTrue(k.heading)
+        self.assertIsInstance(k.GaitClock(), V.GaitClock)
+        d = k.depth
+        self.assertFalse(d.pie)
+        self.assertTrue(d.optical_z)
+        self.assertEqual((d.frame_shape, d.history_shape), ((80, 68), (2, 80, 68)))
+        self.assertAlmostEqual(d.fovy_deg, 91.79, places=2)   # 2 atan(40 / f)
+        self.assertEqual(d.camera_pos, (0.307, 0.05, 0.1273))
+        self.assertEqual(d.camera_quat, (0.5, 0.5, -0.5, -0.5))
+        with self.assertRaises(ValueError):      # a v3 student without its term
+            V.StudentContract(heading_metadata("go2_depth_v3")
+                              | {"observation_names": ",".join(V.OBSERVATION_NAMES)})
+
+    def test_exports_without_camera_metadata_are_pie(self):
+        d = V.contract_for(heading_metadata()).depth
+        self.assertIs(d, V.PIE_DEPTH)
+        self.assertEqual(d.history_shape, C.DEPTH_HISTORY_SHAPE)
+        self.assertAlmostEqual(d.fovy_deg, C.DEPTH_FOVY_DEG, places=6)
+
+    def test_navcore_frame(self):
+        d = V.depth_spec(NAVCORE_META)
+        self.assertEqual(d.min_range_m, V.NAVCORE_MIN_RANGE_M)
+        z = np.full((80, 68), 1.5, np.float32)
+        z[0, :6] = 0.0, np.nan, 7.0, 0.01, 0.1, 0.3
+        frame = d.preprocess(z)
+        self.assertEqual(frame.shape, (1, 80, 68))
+        # misses, anything past max range and anything under the camera's
+        # minimum range read max range
+        np.testing.assert_allclose(frame[0, 0, :6], (1.0, 1.0, 1.0, 1.0, 1.0, 0.1))
+        np.testing.assert_allclose(frame[0, 1:, :], 0.5)
+        # without a minimum range the near end clamps
+        z[0, 3] = 0.01
+        np.testing.assert_allclose(
+            V.DepthSpec("raw", 68, 80, d.focal_px, True, 3.0).preprocess(z)[0, 0, 3],
+            C.DEPTH_MIN_M / 3.0)
+        with self.assertRaises(ValueError):
+            d.preprocess(np.ones((60, 106), np.float32))
+        history = C.DepthHistory(frame_shape=d.frame_shape)
+        history.append(frame)
+        self.assertEqual(history.array.shape, (2, 80, 68))
+
+
 if __name__ == "__main__":
     unittest.main()

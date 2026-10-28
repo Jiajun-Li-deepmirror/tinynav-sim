@@ -13,10 +13,16 @@ reads the policy as trained:
       policy order (deploy.yaml actions joint_names; legged: unchanged)
   action_layout      joint_pos[position]*0.25:<legs>[;wheel_vel[velocity]*s:<wheels>]
   wheel_brake_rad_s  deploy.yaml brake_below_speed (wheel-legged)
+  gait_period, gait_ref_speed, gait_foot_xy, gait_march
+                     the speed clock of deploy.yaml's gait_phase (go2-blind's
+                     legged finals of 2026-10-27: ref_speed, foot_xy) and its
+                     gait_march flag; absent for the fixed-clock exports
   source_md5         md5 of the go2-blind ONNX it came from
 
     python import_blind_policy.py <blind_v0 dir> <out.onnx>
 
+The directory holds exported/policy.onnx and params/deploy.yaml (go2-blind's
+deploy tree), or policy.onnx and deploy.yaml side by side (its hand-offs).
 Needs onnx and pyyaml (not sim dependencies).
 """
 from __future__ import annotations
@@ -36,7 +42,10 @@ def _csv(values) -> str:
 
 def import_policy(src: Path, out: Path) -> dict[str, str]:
     onnx_path = src / "exported" / "policy.onnx"
-    deploy = yaml.safe_load((src / "params" / "deploy.yaml").read_text())
+    deploy_path = src / "params" / "deploy.yaml"
+    if not onnx_path.exists():
+        onnx_path, deploy_path = src / "policy.onnx", src / "deploy.yaml"
+    deploy = yaml.safe_load(deploy_path.read_text())
     model = onnx.load(onnx_path)
     meta = {p.key: p.value for p in model.metadata_props}
     model_names = meta["joint_names"].split(",")
@@ -78,6 +87,15 @@ def import_policy(src: Path, out: Path) -> dict[str, str]:
     })
     if velocity is not None:
         meta["wheel_brake_rad_s"] = f"{float(velocity['brake_below_speed']):.6g}"
+    clock = (deploy.get("observations", {}).get("gait_phase") or {}).get("params") or {}
+    if clock.get("ref_speed") is not None:
+        # as written in deploy.yaml (B2's ref_speed 1.318333 has 7 digits)
+        meta["gait_period"] = repr(float(clock["period"]))
+        meta["gait_ref_speed"] = repr(float(clock["ref_speed"]))
+        if clock.get("foot_xy"):
+            meta["gait_foot_xy"] = ";".join(",".join(repr(float(v)) for v in foot)
+                                            for foot in clock["foot_xy"])
+        meta["gait_march"] = "1" if deploy.get("gait_march") else "0"
     del model.metadata_props[:]
     for key, value in meta.items():
         model.metadata_props.add(key=key, value=value)

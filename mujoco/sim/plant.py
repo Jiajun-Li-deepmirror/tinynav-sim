@@ -23,6 +23,7 @@ splatsense map3 scene, mirroring training exactly:
 
 from __future__ import annotations
 
+import copy
 import re
 import sys
 from dataclasses import dataclass
@@ -139,6 +140,8 @@ CONTRACT_DEPTH_CAMERA = "infra1_contract"
 TERRAIN_FRICTION = (0.6, 0.005, 0.0001)
 
 DEPTH_CAMERA_NAME = "front_depth"
+SHELL_GEOM_NAME = "front_depth_camera_visual"
+SHELL_HALF_SIZE = (0.045, 0.018, 0.012)   # PIE sim2sim's camera shell
 
 
 @dataclass(frozen=True)
@@ -311,17 +314,116 @@ def _add_depth_camera_and_shell(base, robot: Robot) -> None:
     )
     # Camera shell visual, same dims/pose as PIE sim2sim (contype 0).
     base.add_geom(
-        name="front_depth_camera_visual",
+        name=SHELL_GEOM_NAME,
         type=mujoco.mjtGeom.mjGEOM_BOX,
         pos=np.add(robot.camera_pos, SHELL_FROM_DEPTH_CAMERA),
         quat=robot.camera_quat,
-        size=(0.045, 0.018, 0.012),
+        size=SHELL_HALF_SIZE,
         rgba=(0.0, 0.0, 0.0, 1.0),
         contype=0,
         conaffinity=0,
         density=0.0,
         group=2,
     )
+
+
+NAVCORE_RGBA = (0.12, 0.12, 0.13, 1.0)
+
+
+WEB_HIDDEN_GROUP = 6   # the web viewer draws geom groups 0-5 only
+
+
+def place_depth_shell(model: mujoco.MjModel, robot: Robot, navcore: bool) -> None:
+    """The depth camera's shell geom on `model` (visual only: contype 0, no
+    mass): the robot's navcore unit (robot.navcore, behind its lenses, so a
+    navcore camera does not see it), or PIE's shell at the robot's trained
+    mount (navcore=False, or a robot without a navcore box)."""
+    shell = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, SHELL_GEOM_NAME)
+    if shell < 0:
+        return
+    if navcore and robot.navcore is not None:
+        pos, quat, half = robot.navcore[0], (1.0, 0.0, 0.0, 0.0), robot.navcore[1]
+        rgba = NAVCORE_RGBA
+    else:
+        pos, quat, half = np.add(robot.camera_pos, SHELL_FROM_DEPTH_CAMERA), robot.camera_quat, SHELL_HALF_SIZE
+        rgba = (0.0, 0.0, 0.0, 1.0)
+    model.geom_pos[shell] = pos
+    model.geom_quat[shell] = quat
+    model.geom_size[shell] = half
+    model.geom_rgba[shell] = rgba
+    model.geom_aabb[shell] = (0.0, 0.0, 0.0, *half)
+    model.geom_rbound[shell] = float(np.linalg.norm(half))
+
+
+def web_view_model(model: mujoco.MjModel, robot: Robot) -> mujoco.MjModel:
+    """Copy of `model` for the web view: the depth camera shell redrawn as the
+    robot's navcore unit (robot.navcore), and the visual meshes the robot no
+    longer carries (robot.web_hidden_meshes, e.g. B2's LiDAR) moved to a group
+    the web viewer never draws. Physics and the depth camera keep `model`, so
+    the policy's depth input does not change."""
+    web = copy.deepcopy(model)
+    place_depth_shell(web, robot, navcore=True)
+    hidden = {mujoco.mj_name2id(web, mujoco.mjtObj.mjOBJ_MESH, m) for m in robot.web_hidden_meshes} - {-1}
+    base = mujoco.mj_name2id(web, mujoco.mjtObj.mjOBJ_BODY, "base_link")
+    for g in range(web.ngeom):
+        if web.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+            continue
+        if web.geom_dataid[g] in hidden:
+            web.geom_group[g] = WEB_HIDDEN_GROUP
+        elif robot.web_hidden_boxes and web.geom_bodyid[g] == base:
+            _hide_mesh_pieces(web, g, robot.web_hidden_boxes)
+    return web
+
+
+_HIDDEN_FACES: dict = {}   # (mesh vertex / face counts, geom pose, boxes) -> faces to drop
+
+
+def _mesh_pieces(faces: np.ndarray, nv: int) -> np.ndarray:
+    """Per-vertex label of its piece (vertices connected through faces): hooking
+    and pointer jumping on numpy arrays (B2-W's trunk: 183k vertices)."""
+    label = np.arange(nv)
+    u = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+    v = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+    while True:
+        lu, lv = label[u], label[v]
+        moved = lu != lv
+        if not moved.any():
+            return label
+        lo, hi = np.minimum(lu[moved], lv[moved]), np.maximum(lu[moved], lv[moved])
+        np.minimum.at(label, hi, lo)        # hook the larger root onto the smaller
+        while True:                         # jump to the roots
+            nxt = label[label]
+            if np.array_equal(nxt, label):
+                break
+            label = nxt
+
+
+def _hide_mesh_pieces(model: mujoco.MjModel, geom: int, boxes) -> None:
+    """Collapse the faces of every separate piece (faces connected through shared
+    vertices) of `geom`'s mesh that lies inside one of `boxes` ((lo, hi) in the
+    geom's body frame). Edits `model`'s mesh data: a web view copy only."""
+    mesh = model.geom_dataid[geom]
+    v0, nv = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+    f0, nf = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
+    faces = model.mesh_face[f0:f0 + nf]
+    key = (int(nv), int(nf), tuple(np.round(model.geom_pos[geom], 6)),
+           tuple(np.round(model.geom_quat[geom], 6)), tuple(map(tuple, map(np.ravel, boxes))))
+    if key not in _HIDDEN_FACES:
+        rot = np.zeros(9)
+        mujoco.mju_quat2Mat(rot, model.geom_quat[geom])
+        verts = model.mesh_vert[v0:v0 + nv] @ rot.reshape(3, 3).T + model.geom_pos[geom]
+        piece = _mesh_pieces(faces, nv)
+        order = np.argsort(piece, kind="stable")
+        starts = np.flatnonzero(np.r_[True, np.diff(piece[order]) != 0])
+        lo = np.minimum.reduceat(verts[order], starts)
+        hi = np.maximum.reduceat(verts[order], starts)
+        inside = np.zeros(len(starts), dtype=bool)
+        for box_lo, box_hi in boxes:
+            inside |= np.all(lo >= box_lo, axis=1) & np.all(hi <= box_hi, axis=1)
+        drop = np.isin(piece, piece[order][starts][inside])
+        _HIDDEN_FACES[key] = drop[faces[:, 0]]
+    gone = _HIDDEN_FACES[key]
+    model.mesh_face[f0:f0 + nf][gone] = faces[gone][:, :1]   # degenerate: all three corners one vertex
 
 
 def _apply_plant_options(spec: mujoco.MjSpec) -> None:

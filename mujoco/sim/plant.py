@@ -75,9 +75,11 @@ def load_boxes(xml_path: str):
 CATCH_FLOOR_Z = -0.05   # scene.xml catch plane
 
 
-def ground_top_at(boxes, x: float, y: float, below_z: float):
-    """Highest walkable top (step/landing/floor plane) under (x, y, below_z)."""
-    best = _ACTIVE.catch_z
+def ground_top_at(boxes, x: float, y: float, below_z: float,
+                  catch_z: float | None = None):
+    """Highest walkable top (step/landing/floor plane) under (x, y, below_z);
+    catch_z: the scene's catch floor (the last built scene's by default)."""
+    best = _ACTIVE.catch_z if catch_z is None else catch_z
     for _, p, s in boxes:
         if abs(x - p[0]) <= s[0] and abs(y - p[1]) <= s[1]:
             top = p[2] + s[2]
@@ -149,7 +151,7 @@ class Scene:
     """One navigable world: mjcf (+ optional collision fragment), catch
     floor, splat ply (model/splat/) and named spawns. Policies belong to
     the robot (sim/robots.py), not the scene. Register a new scene = one
-    dict entry.
+    dict entry (the registry's order is the web panel's map dropdown's).
     xml is None only for the procedural "flat" smoke terrain (built from
     a string, no mjcf file)."""
 
@@ -159,20 +161,11 @@ class Scene:
     ply: str
     spawns: dict
     default_spawn: str
+    label: str = ""
+    """The web panel's map dropdown entry (the name without one)."""
 
 
 SCENES: dict[str, Scene] = {
-    # flat smoke terrain: procedural ground plane + go2 (build_flat_model),
-    # no walls and no catch cliff -- the emu bench's long-run scene. The
-    # 20 m plane bounds the walk far before integrator drift matters.
-    "flat": Scene(
-        xml=None,
-        collision=None,
-        catch_z=-1.0,
-        ply="",
-        spawns={"origin": ((0.0, 0.0, 0.32), 0.0)},
-        default_spawn="origin",
-    ),
     # map3 stairwell: 123 exact collision boxes (Blender rebuild), F1 slab
     # tops at z=0, catch floor 5 cm below.
     "map3": Scene(
@@ -186,6 +179,7 @@ SCENES: dict[str, Scene] = {
             "flat1": ((-7.4, 4.0, 12.2), 180.0),
         },
         default_spawn="down",
+        label="map3 楼梯井",
     ),
     # MetaCam map_2 indoor (spirula_ba_s2 step-50000, 2.98M gaussians).
     # Spawn = the gsplat-validated low-capture-band spot (map2_go2.json
@@ -199,6 +193,19 @@ SCENES: dict[str, Scene] = {
         ply="map2_scene.ply",
         spawns={"low": ((3.21, -5.54, -0.755), -11.49)},
         default_spawn="low",
+        label="map2 室内",
+    ),
+    # flat smoke terrain: procedural ground plane + go2 (build_flat_model),
+    # no walls and no catch cliff -- the emu bench's long-run scene. The
+    # 20 m plane bounds the walk far before integrator drift matters.
+    "flat": Scene(
+        xml=None,
+        collision=None,
+        catch_z=-1.0,
+        ply="",
+        spawns={"origin": ((0.0, 0.0, 0.32), 0.0)},
+        default_spawn="origin",
+        label="flat 平地",
     ),
 }
 _ACTIVE = SCENES["map3"]
@@ -234,6 +241,7 @@ class Bindings:
     joint_names: tuple[str, ...]
     default_joint_pos: np.ndarray
     ctrl_default: np.ndarray   # standing ctrl: default angle, 0 for wheels
+    scene_name: str = "map3"   # the scene it was built in (SCENES key)
 
 
 def _configure_robot_spec(spec: mujoco.MjSpec) -> None:
@@ -445,7 +453,8 @@ def _joint_names(model: mujoco.MjModel, robot: Robot) -> tuple[str, ...]:
         if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE)
 
 
-def _bindings(model: mujoco.MjModel, shell_id: int, robot: Robot) -> Bindings:
+def _bindings(model: mujoco.MjModel, shell_id: int, robot: Robot,
+              scene_name: str = "map3") -> Bindings:
     def id_of(obj_type, name):
         i = mujoco.mj_name2id(model, obj_type, name)
         if i < 0:
@@ -492,6 +501,7 @@ def _bindings(model: mujoco.MjModel, shell_id: int, robot: Robot) -> Bindings:
         joint_names=joint_names,
         default_joint_pos=default_joint_pos,
         ctrl_default=ctrl_default,
+        scene_name=scene_name,
     )
 
 
@@ -525,7 +535,8 @@ def _validate(model: mujoco.MjModel, b: Bindings) -> None:
         raise ValueError("compiled actuator contract does not match PIE")
 
 
-def _compile(scene_spec: mujoco.MjSpec, with_shell: bool, robot: Robot):
+def _compile(scene_spec: mujoco.MjSpec, with_shell: bool, robot: Robot,
+             scene_name: str = "map3"):
     shell = None
     if with_shell:
         for geom in scene_spec.geoms:
@@ -544,6 +555,7 @@ def _compile(scene_spec: mujoco.MjSpec, with_shell: bool, robot: Robot):
         mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "front_depth_camera_visual")
         if with_shell else -1,
         robot,
+        scene_name,
     )
     _validate(model, b)
     return model, b
@@ -593,7 +605,7 @@ def build_model(scene_name: str = "map3",
     )
     _apply_plant_options(scene)
 
-    model, b = _compile(scene, with_shell=True, robot=rb)
+    model, b = _compile(scene, with_shell=True, robot=rb, scene_name=scene_name)
 
     # spawn sanity: depth camera = base +x pitched down 20deg, i.e. world
     # (-cos20, 0, -sin20) at spawn yaw 180.
@@ -633,7 +645,7 @@ def build_flat_model(robot: str = DEFAULT_ROBOT) -> tuple[mujoco.MjModel, Bindin
     base_in_scene = next(b for b in scene.worldbody.bodies if b.name == "base_link")
     _add_depth_camera_and_shell(base_in_scene, rb)
     _apply_plant_options(scene)
-    return _compile(scene, with_shell=True, robot=rb)
+    return _compile(scene, with_shell=True, robot=rb, scene_name="flat")
 
 
 def reset_to_spawn(model: mujoco.MjModel, data: mujoco.MjData, b: Bindings,
@@ -642,24 +654,28 @@ def reset_to_spawn(model: mujoco.MjModel, data: mujoco.MjData, b: Bindings,
     """Drop the dog at the scene spawn (map3), origin+0.32 (flat), or an
     explicit pos/yaw override (e.g. the R2b stairs-down start on
     landing_F4_east at (-8.75, 5.7) facing -y = yaw 270). Heights are
-    go2's; other robots stand their own spawn_drop above the ground."""
+    go2's; other robots stand their own spawn_drop above the ground. The
+    scene is the one the model was built in (b.scene_name)."""
     mujoco.mj_resetData(model, data)
     root = b.root_qpos_adr
     drop = b.robot.spawn_drop
+    sc = SCENES.get(b.scene_name, _ACTIVE)
+    if pos is None and sc.collision is None and sc.xml is not None:
+        # map2 and the like: their default spawn (a validated standing pose)
+        pos, yaw_deg = sc.spawns[sc.default_spawn]
     if pos is not None:
-        sc = _ACTIVE
         if sc.collision is not None:
             boxes = load_boxes(str(sc.collision))
-            z = ground_top_at(boxes, *pos[:2], pos[2]) + drop
+            z = ground_top_at(boxes, *pos[:2], pos[2], catch_z=sc.catch_z) + drop
         else:
             # scenes without a collision fragment: the hint IS a validated
             # standing pose (e.g. map2's gsplat initial_qpos) for go2
             z = pos[2] + drop - SPAWN_DROP
         yaw = np.radians(yaw_deg if yaw_deg is not None else 0.0)
         data.qpos[root:root + 3] = (pos[0], pos[1], z)
-    elif model.ngeom > 100:  # map3: 123 collision boxes + floor -> find slab top
-        boxes = load_boxes(str(SCENES["map3"].collision))
-        z = ground_top_at(boxes, *SPAWN_XYZ[:2], SPAWN_XYZ[2]) + drop
+    elif sc.collision is not None:  # map3: 123 collision boxes + floor -> find slab top
+        boxes = load_boxes(str(sc.collision))
+        z = ground_top_at(boxes, *SPAWN_XYZ[:2], SPAWN_XYZ[2], catch_z=sc.catch_z) + drop
         yaw = np.radians(SPAWN_YAW_DEG)
         data.qpos[root:root + 3] = (SPAWN_XYZ[0], SPAWN_XYZ[1], z)
     else:

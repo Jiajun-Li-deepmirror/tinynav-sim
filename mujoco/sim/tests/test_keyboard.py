@@ -52,14 +52,14 @@ class TestToggles(unittest.TestCase):
         kb = K.HoldCmd(use_global=False)
         kb._input_poll = poll = FakePoll()
         self.assertFalse(kb.consume_march())
-        poll.held = {K.MARCH_KEY}                        # M pressed (global poll)
+        poll.held = {K.MARCH_KEY}                        # 、 pressed (global poll)
         self.assertEqual(kb.active(), "idle")            # not a move key
         self.assertEqual(kb.vector().tolist(), [0.0, 0.0, 0.0])
         self.assertTrue(kb.consume_march())
         self.assertFalse(kb.consume_march())             # held: one press
         poll.held = set()
         self.assertFalse(kb.consume_march())
-        poll.held = {K.MARCH_KEY, 265}                   # M with Up: both work
+        poll.held = {K.MARCH_KEY, 265}                   # 、 with Up: both work
         self.assertTrue(kb.consume_march())
         self.assertGreater(float(kb.vector()[0]), 0.0)
 

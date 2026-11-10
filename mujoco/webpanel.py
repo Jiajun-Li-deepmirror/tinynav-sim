@@ -636,7 +636,7 @@ class OperatorPanel:
             from sim.keyboard import VX_HOLD, VX_HOLD_BWD, VY_HOLD, WZ_HOLD
             fwd, back, vy, wz = VX_HOLD, VX_HOLD_BWD, VY_HOLD, WZ_HOLD
         return (f"<small>键盘 ↑/↓ {fwd:.2f}/{back:.2f} · ←/→ {wz:.2f} · "
-                f"<b>,</b>/<b>.</b> {vy:.2f} · M 踏步 · 手柄 X 踏步</small>")
+                f"<b>,</b>/<b>.</b> {vy:.2f} · <b>、</b> 踏步 · 手柄 X 踏步</small>")
 
     def _frame_new_client(self, client) -> None:
         # framed by the next update(), on the control thread, behind the robot

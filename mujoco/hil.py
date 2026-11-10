@@ -340,7 +340,7 @@ def main() -> int:
     print(f"robot={robot.name} policy={_primary.name} "
           f"contract={policy.contract.name}", flush=True)
     kind = "perception"
-    # marching in place: M / pad X-Y toggle it, Stop and Reset end it
+    # marching in place: 、 / pad X-Y toggle it, Stop and Reset end it
     march = False
     # the hips' estimated motor temperatures (panel plot)
     from sim.thermal import HipThermal

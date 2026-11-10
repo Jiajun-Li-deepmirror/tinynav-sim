@@ -729,7 +729,7 @@ def main() -> int:
     posture = PostureReset(world.robot.name)
     if panel is not None:
         panel.show_posture(posture.enabled)
-    # marching in place: M / pad X-Y toggle it, Stop and Reset end it; the
+    # marching in place: 、 / pad X-Y toggle it, Stop and Reset end it; the
     # policy marches on a zero command if it was trained to (gait_march)
     march = False
     fps = 0.0
@@ -787,7 +787,7 @@ def main() -> int:
             if on is not None:
                 posture.enabled = on
                 print(f"[POSTURE] reset {'on' if on else 'off'} ({world.robot.name})", flush=True)
-            # the operator's march (M / pad X-Y) or the posture reset's, as on
+            # the operator's march (、 / pad X-Y) or the posture reset's, as on
             # the robot (env->march = march || march_request)
             world.rt.march = march or posture.marching
             world.rt.tick()

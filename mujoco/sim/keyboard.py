@@ -33,7 +33,8 @@ release-flush-to-idle path.
     Up      vx forward              Down    vx back
     Left    wz left                 Right   wz right
     ,       vy left                 .       vy right   (strafe)
-    M       march in place on / off (consume_march; the host keeps the state)
+    、       march in place on / off (consume_march; the host keeps the state): the backslash
+            key, which types 「、」 under a Chinese IME (2026-11-10, the user; was M)
     Space   stop    R reset (viewer window / web GUI button)
 
 Hosts with a policy (view, hil) call set_envelope() with its training
@@ -62,11 +63,12 @@ RELEASE_FLUSH_S = 1.0   # post-release zero-flush window (gazebo RELEASE_FLUSH_S
 
 _ARROW_ACTIONS = {265: "vx+", 264: "vx-", 263: "wz+", 262: "wz-",
                   44: "vy+", 46: "vy-"}
-MARCH_KEY = 77   # M: a press toggles marching in place (not a held move key)
+MARCH_KEY = 92   # 、 / backslash (GLFW 92): a press toggles marching in place (not a held move key)
 
 # kernel input.h key codes -> the GLFW-ish codes used internally
 _KERNEL_TO_CODE = {103: 265, 108: 264, 105: 263, 106: 262,  # UP DOWN LEFT RIGHT
-                   51: 44, 52: 46, 50: MARCH_KEY}           # COMMA DOT M
+                   51: 44, 52: 46,                          # COMMA DOT
+                   43: MARCH_KEY, 86: MARCH_KEY}            # BACKSLASH, and ISO's 102ND (same 、 / \ legend)
 # A device counts as a keyboard when it has the arrow keys.
 _KERNEL_ARROWS = (103, 108, 105, 106)
 
@@ -145,7 +147,7 @@ class HoldCmd:
         # (vx forward, vx back, vy, wz) a held key commands
         self._hold = (VX_HOLD, VX_HOLD_BWD, VY_HOLD, WZ_HOLD)
         self._reset_pending = False
-        self._march_pending = False   # M pressed (edge), taken by consume_march
+        self._march_pending = False   # 、 pressed (edge), taken by consume_march
         self._stop_pending = False    # Space pressed (edge), taken by consume_stop
         self._march_was_held = False
         self._cb_held: dict[int, float] = {}   # code -> last event time
@@ -205,7 +207,7 @@ class HoldCmd:
         if k == 82:                        # R: reset edge
             self._reset_pending = True
             return True
-        if k == MARCH_KEY:                 # M: march toggle edge
+        if k == MARCH_KEY:                 # 、: march toggle edge
             self._march_pending = True
             return True
         return False
@@ -297,7 +299,7 @@ class HoldCmd:
         return edge
 
     def consume_march(self) -> bool:
-        """M pressed since the last call (toggle marching in place)."""
+        """、 (backslash) pressed since the last call (toggle marching in place)."""
         self._held_set()     # the global poll's press edge
         edge = self._march_pending
         self._march_pending = False

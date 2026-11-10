@@ -24,6 +24,7 @@ splatsense map3 scene, mirroring training exactly:
 from __future__ import annotations
 
 import copy
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -39,6 +40,16 @@ from . import contract as C  # noqa: E402
 from .robots import DEFAULT_ROBOT, Robot, get_robot  # noqa: E402
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write through a temp file and a rename. Several processes compose the
+    same scene into one workdir at once (the tinynav acceptance of two
+    training boxes); a plain write_text truncates first, and a reader in
+    between got an empty scene.xml."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _preprocess_scene(scene_path: Path, workdir: Path) -> Path:
     """MuJoCo's <include> needs a rooted document, but collision fragments
     ship as bare <geom> lists (the motrixsim parser tolerated that). Copy
@@ -48,10 +59,10 @@ def _preprocess_scene(scene_path: Path, workdir: Path) -> Path:
     text = scene_path.read_text()
     for m in re.finditer(r'<include\s+file="([^"]+)"\s*/?>', text):
         coll = scene_path.parent / m.group(1)
-        (workdir / m.group(1)).write_text(
-            "<mujoco>\n" + coll.read_text() + "\n</mujoco>\n")
+        _write_atomic(workdir / m.group(1),
+                      "<mujoco>\n" + coll.read_text() + "\n</mujoco>\n")
     fixed = workdir / scene_path.name
-    fixed.write_text(text)
+    _write_atomic(fixed, text)
     return fixed
 
 

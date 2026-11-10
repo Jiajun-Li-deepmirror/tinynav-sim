@@ -172,6 +172,11 @@ class ViserMujocoScene:
     # (camera id, frustum-from-camera-body rotation, handle).
     self._camera_frustums: list[tuple[int, np.ndarray, viser.CameraFrustumHandle]] = []
     self._show_camera_frustums: bool = True
+    # LOCAL PATCH (tinynav-sim 2026-11-10): small spheres riding a body at a
+    # local point (add_body_marker) or at the robot's whole-body centre of
+    # mass (add_com_marker: mj_data.subtree_com of a body), redrawn per frame
+    self._body_markers: dict[str, list] = {}
+    self._com_markers: dict[str, list] = {}
 
     # Visualization settings.
     self.env_idx = 0
@@ -351,6 +356,80 @@ class ViserMujocoScene:
       for _, _, handle in self._camera_frustums:
         handle.remove()
       self._camera_frustums = []
+
+  def add_body_marker(self, name: str, body: str, local_pos, radius: float = 0.03,
+                      color=(255, 140, 0), label: str | None = None) -> None:
+    """A sphere riding `body` at `local_pos` (body frame, m), with `label` drawn
+    over everything (the body hides the sphere); set_marker_pos moves it,
+    set_marker_visible hides it (LOCAL PATCH)."""
+    bid = mujoco.mj_name2id(self.mj_model, mjtObj.mjOBJ_BODY, body)
+    if bid < 0:
+      raise ValueError(f"model has no body {body!r}")
+    handle = self.server.scene.add_icosphere(
+      f"/marker_{name}", radius=radius, color=color, subdivisions=2, cast_shadow=False)
+    with self._update_lock:
+      old = self._body_markers.pop(name, None)
+      if old is not None:
+        for h in old[2:]:
+          if h is not None:
+            h.remove()
+      tag = (self.server.scene.add_label(
+        f"/marker_{name}_label", label, depth_test=False, anchor="bottom-center",
+        font_screen_scale=0.8) if label else None)
+      self._body_markers[name] = [bid, np.asarray(local_pos, dtype=np.float64), handle, tag]
+
+  def add_com_marker(self, name: str, body: str, radius: float = 0.025,
+                     color=(40, 200, 90), label: str | None = None) -> None:
+    """A sphere at the centre of mass of `body`'s subtree (the whole robot for
+    its root body), from mj_data.subtree_com, with `label` drawn over
+    everything; set_com_ground(name, z) adds a line from it straight down to
+    the floor at world height z and a flat dot there (LOCAL PATCH)."""
+    bid = mujoco.mj_name2id(self.mj_model, mjtObj.mjOBJ_BODY, body)
+    if bid < 0:
+      raise ValueError(f"model has no body {body!r}")
+    sc = self.server.scene
+    handle = sc.add_icosphere(
+      f"/marker_{name}", radius=radius, color=color, subdivisions=2, cast_shadow=False)
+    with self._update_lock:
+      old = self._com_markers.pop(name, None)
+      if old is not None:
+        for h in old[1:5]:
+          if h is not None:
+            h.remove()
+      tag = (sc.add_label(f"/marker_{name}_label", label, depth_test=False,
+                          anchor="bottom-center", font_screen_scale=0.8) if label else None)
+      drop = sc.add_line_segments(
+        f"/marker_{name}_drop", np.zeros((1, 2, 3), np.float32), color,
+        thickness=2.0, thickness_units="screen", visible=False)
+      dot = sc.add_icosphere(
+        f"/marker_{name}_dot", radius=1.6 * radius, color=color, subdivisions=2,
+        scale=(1.0, 1.0, 0.12), cast_shadow=False, visible=False)
+      self._com_markers[name] = [bid, handle, tag, drop, dot, None]
+
+  def set_marker_pos(self, name: str, local_pos) -> None:
+    with self._update_lock:
+      if name in self._body_markers:
+        self._body_markers[name][1] = np.asarray(local_pos, dtype=np.float64)
+
+  def set_com_ground(self, name: str, z: float | None) -> None:
+    """The floor's world height under com marker `name` (None: no drop line)."""
+    with self._update_lock:
+      if name in self._com_markers:
+        self._com_markers[name][5] = None if z is None else float(z)
+
+  def set_marker_visible(self, name: str, visible: bool) -> None:
+    with self._update_lock:
+      if name in self._body_markers:
+        for h in self._body_markers[name][2:4]:
+          if h is not None:
+            h.visible = bool(visible)
+      if name in self._com_markers:
+        m = self._com_markers[name]
+        for h in m[1:3]:
+          if h is not None:
+            h.visible = bool(visible)
+        if not visible:
+          m[3].visible = m[4].visible = False
 
   def set_refresh_handler(self, handler: Callable[[], None] | None) -> None:
     """Install a callback used to refresh cached visualization state."""
@@ -1043,6 +1122,29 @@ class ViserMujocoScene:
     self.fixed_bodies_frame.wxyz = rot_wxyz
     slice_single = self.show_only_selected and self.num_envs > 1
     with self.server.atomic():
+      # LOCAL PATCH: body markers ride their bodies; com markers sit at the
+      # subtree centre of mass (mj_data, the shown env)
+      for bid, local, handle, tag in self._body_markers.values():
+        if handle.visible:
+          xmat = body_xmat[env_idx, bid]
+          handle.position = rot @ (body_xpos[env_idx, bid] + xmat @ local) + shift
+          if tag is not None:
+            tag.position = handle.position
+      if self._com_markers and self._last_mj_data is not None:
+        for bid, handle, tag, drop, dot, ground in self._com_markers.values():
+          if not handle.visible:
+            continue
+          com = np.asarray(self._last_mj_data.subtree_com[bid], dtype=np.float64)
+          handle.position = rot @ com + shift
+          if tag is not None:
+            tag.position = handle.position
+          if ground is None or ground >= com[2]:
+            drop.visible = dot.visible = False
+            continue
+          foot = rot @ np.array([com[0], com[1], ground + 0.002]) + shift
+          drop.points = np.stack([handle.position, foot])[None].astype(np.float32)
+          dot.position = foot
+          drop.visible = dot.visible = True
       # LOCAL PATCH: camera frustums ride their bodies (the shown env's)
       if self._show_camera_frustums:
         for cam, local, handle in self._camera_frustums:

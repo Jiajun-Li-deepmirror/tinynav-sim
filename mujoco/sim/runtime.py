@@ -23,6 +23,7 @@ import numpy as np
 
 from . import contract as C
 from .contract_v2 import PIE_DEPTH
+from .depth_monitor import DepthMonitor
 from .plant import Bindings, place_depth_shell, reset_to_spawn
 
 # Joint-target safety clamp around the default pose, as the real-robot deploy
@@ -98,11 +99,33 @@ def _sensor_address(model: mujoco.MjModel, name: str) -> int:
     return int(model.sensor_adr[sid])
 
 
+class _Lane:
+    """A second policy riding along (the fallback): its contract, the joint
+    addresses in its joint order, and its own proprioceptive history, heading
+    error and gait clock."""
+
+    def __init__(self, policy, b: Bindings) -> None:
+        self.policy = policy
+        self.contract = k = policy.contract
+        idx = np.asarray([b.joint_names.index(j) for j in k.joint_names])
+        self.qpos_adr, self.dof_adr = b.joint_qpos_adr[idx], b.joint_dof_adr[idx]
+        self.proprio_history = k.ProprioHistory()
+        self.heading = k.HeadingError()
+        self.gait = k.GaitClock()
+
+    def reset(self) -> None:
+        self.proprio_history.reset()
+        for state in (self.heading, self.gait):
+            if state is not None:
+                state.reset()
+        self.policy.reset()
+
+
 class PieRuntime:
     def __init__(self, model: mujoco.MjModel, b: Bindings,
                  data: mujoco.MjData, policy, depth_camera: DepthCamera,
                  cmd_source, spawn_pos=None, spawn_yaw_deg=None,
-                 substep_hook=None) -> None:
+                 substep_hook=None, fallback_policy=None) -> None:
         self.model = model
         self.b = b
         self.data = data
@@ -140,6 +163,21 @@ class PieRuntime:
         # march in place on a zero command (only policies trained for it,
         # contract.gait_march; set by the host)
         self.march = False
+        # The robot's blind policy riding along with a navcore student: its
+        # observation and action are computed every tick, so its histories are
+        # warm, and it drives while the depth monitor distrusts the frame
+        # (sim/depth_monitor.py). None: the student alone.
+        # fallback_enabled: the host's switch (the monitor runs either way).
+        self.fallback = self.monitor = None
+        self.fallback_enabled = True
+        self.fallback_active = False
+        if (fallback_policy is not None and self.uses_depth and not self.depth_spec.pie
+                and self._fallback_fits(fallback_policy.contract)):
+            self.fallback = _Lane(fallback_policy, b)
+            self.monitor = DepthMonitor(self.depth_spec)
+        # the fallback's PD gains, set while it drives (None: the student's)
+        self._fallback_gains = (self._pd_gains(fallback_policy, fallback_policy.contract)
+                                if self.fallback is not None else None)
         self.depth_history = C.DepthHistory(frame_shape=self.depth_spec.frame_shape)
         self.control_step = 0
         self.latest_raw_depth = None
@@ -171,8 +209,11 @@ class PieRuntime:
 
     def _bind_contract(self) -> None:
         """Map the contract's joints and action groups onto the plant, and
-        refuse a policy trained for another robot (joints, default pose or
-        PD gains differ). A policy standing within DEFAULT_POSE_TOLERANCE of
+        refuse a policy trained for another robot (joints or default pose
+        differ); the position actuators take the policy's PD gains (metadata
+        joint_stiffness / joint_damping), as the robot does its deploy.yaml's
+        (go2-blind's B2W polish 9000 trains its legs at 1.5x, "legkp15").
+        A policy standing within DEFAULT_POSE_TOLERANCE of
         the robot's stance is bound and the plant takes its stance: the spawn
         pose and settle targets of reset_to_spawn (the Bindings arrays, shared
         with the host's world)."""
@@ -193,11 +234,8 @@ class PieRuntime:
             position = self.model.actuator_biasprm[b.actuator_ids[idx], 1] != 0.0
             b.default_joint_pos[idx] = default
             b.ctrl_default[idx] = np.where(position, default, b.ctrl_default[idx])
-        meta = getattr(self.policy, "metadata", {})
-        gains = {key: [float(v) for v in meta[key].split(",")]
-                 for key in ("joint_stiffness", "joint_damping") if key in meta}
         # (actuator ids, slice of the action vector, scale, default or None,
-        # joint dof addresses)
+        # joint dof addresses, joint qpos addresses)
         self._action_map = []
         start = 0
         for group in k.action_groups:
@@ -207,16 +245,30 @@ class PieRuntime:
             offset = default[jidx] if group.kind == "position" else None
             self._action_map.append((ids, slice(start, stop),
                                      np.float32(group.scale), offset,
-                                     self._dof_adr[jidx]))
+                                     self._dof_adr[jidx], self._qpos_adr[jidx]))
             start = stop
-            if group.kind == "position" and len(gains) == 2:
-                kp = np.asarray(gains["joint_stiffness"])[jidx]
-                kd = np.asarray(gains["joint_damping"])[jidx]
-                if not (np.allclose(self.model.actuator_gainprm[ids, 0], kp, atol=1e-3)
-                        and np.allclose(-self.model.actuator_biasprm[ids, 2], kd,
-                                        atol=1e-3)):
-                    raise ValueError(f"policy {k.name!r} PD gains do not match "
-                                     f"robot {b.robot.name!r} actuators")
+        self._gains_now = None
+        self._main_gains = self._pd_gains(self.policy, k)
+        self._apply_gains(self._main_gains)
+        # The contact solver the policy was trained with, on the shared model:
+        # each binding sets it, MuJoCo's pyramidal cone at impratio 1 without
+        # the metadata.
+        cone = getattr(k, "sim_cone", None) or "pyramidal"
+        self.model.opt.cone = {"pyramidal": mujoco.mjtCone.mjCONE_PYRAMIDAL,
+                               "elliptic": mujoco.mjtCone.mjCONE_ELLIPTIC}[cone]
+        self.model.opt.impratio = getattr(k, "sim_impratio", None) or 1.0
+        self._reset_brake()
+
+    def _reset_brake(self) -> None:
+        """Release the wheel brake, as training does on a reset."""
+        # per action group: braked last tick, the angles it holds
+        self._braked = [False] * len(self._action_map)
+        self._brake_hold = [None] * len(self._action_map)
+        self._zero_command_s = 0.0
+        # the legs' standstill hold (contract leg_hold_*): held, the targets, its timer
+        self._leg_held = [False] * len(self._action_map)
+        self._leg_hold_target = [None] * len(self._action_map)
+        self._leg_still_s = 0.0
 
     # -- state -------------------------------------------------------------
     def base_pos(self) -> np.ndarray:
@@ -243,6 +295,12 @@ class PieRuntime:
         self.policy.reset()
         self.control_step = 0
         self.latest_raw_depth = None
+        self._reset_brake()
+        if self.fallback is not None:
+            self.fallback.reset()
+            self.monitor.reset()
+            self.fallback_active = False
+            self._apply_gains(self._main_gains)
 
     # -- observation (mirrors upstream build_observation) -------------------
     def build_observation(self, command: np.ndarray) -> np.ndarray:
@@ -266,6 +324,67 @@ class PieRuntime:
             joint_pos, joint_vel, self.last_action, self.control_step,
             heading_error=heading_error, gait_phase=gait_phase,
         )
+
+    def _lane_observation(self, lane: _Lane, command: np.ndarray) -> np.ndarray:
+        """build_observation for the fallback: the same sensors and applied
+        action, in its contract's joint order and terms."""
+        root = self.b.root_qpos_adr
+        quaternion = self.data.qpos[root + 3:root + 7]
+        k = lane.contract
+        shaped = k.shape_command(command)
+        heading_error = None if lane.heading is None else lane.heading(quaternion, shaped[2])
+        gait_phase = (None if lane.gait is None else
+                      lane.gait(shaped, march=self.march and k.gait_march))
+        return k.build_proprioception(
+            self.data.sensordata[self.b.gyro_adr:self.b.gyro_adr + 3], quaternion, shaped,
+            self.data.qpos[lane.qpos_adr], self.data.qvel[lane.dof_adr], self.last_action,
+            self.control_step, heading_error=heading_error, gait_phase=gait_phase)
+
+    def _pd_gains(self, policy, k):
+        """(actuator ids, kp, kd) of the contract's position groups from the
+        policy's metadata, or None without joint_stiffness / joint_damping."""
+        meta = getattr(policy, "metadata", {})
+        if not all(key in meta for key in ("joint_stiffness", "joint_damping")):
+            return None
+        kp_all = np.array([float(v) for v in meta["joint_stiffness"].split(",")])
+        kd_all = np.array([float(v) for v in meta["joint_damping"].split(",")])
+        names = self.b.joint_names
+        ids, kp, kd = [], [], []
+        for group in k.action_groups:
+            if group.kind != "position":
+                continue
+            jidx = [k.joint_names.index(j) for j in group.joints]
+            ids.append(self.b.actuator_ids[[names.index(j) for j in group.joints]])
+            kp.append(kp_all[jidx])
+            kd.append(kd_all[jidx])
+        return (np.concatenate(ids), np.concatenate(kp), np.concatenate(kd)) if ids else None
+
+    def _apply_gains(self, gains) -> None:
+        """Set the position actuators' PD gains (kp (target - q) - kd dq)."""
+        if gains is None or gains is self._gains_now:
+            return
+        ids, kp, kd = gains
+        if not (np.allclose(self.model.actuator_gainprm[ids, 0], kp, atol=1e-3)
+                and np.allclose(-self.model.actuator_biasprm[ids, 2], kd, atol=1e-3)):
+            print(f"[RT] PD gains kp {kp.min():g}-{kp.max():g}, kd {kd.min():g}-{kd.max():g}", flush=True)
+        self.model.actuator_gainprm[ids, 0] = kp
+        self.model.actuator_biasprm[ids, 1] = -kp
+        self.model.actuator_biasprm[ids, 2] = -kd
+        self._gains_now = gains
+
+    def _fallback_fits(self, k) -> bool:
+        """The fallback must drive the same actuators the same way: one action
+        vector serves both policies (e.g. the heading students stand their hips
+        at +-0.1, the blind finals at 0: no fallback for those)."""
+        mine = self.contract
+        layout = lambda c: [(g.kind, tuple(g.joints), float(g.scale)) for g in c.action_groups]
+        pose = lambda c: dict(zip(c.joint_names, np.asarray(c.default_joint_pos, float)))
+        if (sorted(mine.joint_names) != sorted(k.joint_names) or layout(mine) != layout(k)
+                or any(abs(pose(mine)[j] - pose(k)[j]) > 1e-3 for j in mine.joint_names)):
+            print(f"[RT] no depth fallback: {k.name!r} does not drive the robot as "
+                  f"{mine.name!r} does (joints, action layout or default pose)", flush=True)
+            return False
+        return True
 
     def depth_frame(self) -> np.ndarray | None:
         """Newest policy depth frame (60x86, ray depth / DEPTH_MAX_M), or
@@ -291,6 +410,12 @@ class PieRuntime:
         self.policy.reset()
         self.control_step = 0
         self.latest_raw_depth = None
+        self._reset_brake()
+        if self.fallback is not None:
+            self.fallback.reset()
+            self.monitor.reset()
+            self.fallback_active = False
+            self._apply_gains(self._main_gains)
 
     # -- one 50 Hz control tick ---------------------------------------------
     def tick(self) -> None:
@@ -311,9 +436,12 @@ class PieRuntime:
                 and self.control_step % C.DEPTH_UPDATE_PERIOD_STEPS == 0):
             raw_depth = self.camera.capture(self.data)
             self.latest_raw_depth = raw_depth
+            if self.monitor is not None:
+                self.monitor.update(raw_depth)
             self.depth_history.append(self.depth_spec.preprocess(raw_depth))
 
-        observation = self.build_observation(self.cmd_source.vector())
+        raw_command = self.cmd_source.vector()
+        observation = self.build_observation(raw_command)
         self.proprio_history.append(observation)
         t0 = time.perf_counter()
         action = self.policy(
@@ -321,23 +449,79 @@ class PieRuntime:
             self.proprio_history.array,
             self.depth_history.array if self.uses_depth else None,
         )
+        if self.fallback is not None:
+            lane = self.fallback
+            fallback_observation = self._lane_observation(lane, raw_command)
+            lane.proprio_history.append(fallback_observation)
+            fallback_action = lane.policy(fallback_observation, lane.proprio_history.array, None)
+            self.fallback_active = self.fallback_enabled and self.monitor.fault is not None
+            if self.fallback_active:
+                action = fallback_action
+            self._apply_gains(self._fallback_gains if self.fallback_active and self._fallback_gains is not None
+                              else self._main_gains)
         self.policy_ms = (time.perf_counter() - t0) * 1e3
-        brake = getattr(self.contract, "wheel_brake_rad_s", None)
-        for ids, part, scale, offset, dof in self._action_map:
+        k = self.contract
+        brake = getattr(k, "wheel_brake_rad_s", None)
+        hold_kp = getattr(k, "wheel_brake_hold_kp", None)
+        ratio = getattr(k, "wheel_brake_release_ratio", None)
+        after_s = getattr(k, "wheel_brake_after_s", None)
+        zero = not np.any(self.command)
+        # the brake's idle command: zero, or (brake_max_forward) a forward command up to that
+        max_forward = getattr(k, "wheel_brake_max_forward", None)
+        idle = zero if max_forward is None else abs(float(self.command[0])) <= max_forward
+        self._zero_command_s = self._zero_command_s + C.CONTROL_DT if idle else 0.0
+        # the leg hold of the policy that drives this step (the fallback's when it does)
+        hk = self.fallback.contract if self.fallback is not None and self.fallback_active else k
+        hold_after = getattr(hk, "leg_hold_after_s", None)
+        still = zero and not (self.march and getattr(hk, "gait_march", False))
+        self._leg_still_s = self._leg_still_s + C.CONTROL_DT if still else 0.0
+        # Half a step of slack: summed float steps fall just short of whole seconds.
+        timed_out = after_s is not None and self._zero_command_s >= after_s - 0.5 * C.CONTROL_DT
+        holds = []   # (actuator ids, qpos addresses, held angles, target per rad)
+        for i, (ids, part, scale, offset, dof, qadr) in enumerate(self._action_map):
             # position: default pose + scale * action; velocity: scale * action
             target = scale * action[part]
             if offset is not None:
                 target = np.clip(offset + target, offset - ACTION_CLIP_RAD,
                                  offset + ACTION_CLIP_RAD)
-            elif (brake is not None and not np.any(self.command)
-                  and np.all(np.abs(self.data.qvel[dof]) < brake)):
-                # Low-speed brake at a zero command, as in training.
-                target = np.zeros_like(target)
+                if hold_after is not None:
+                    # Standstill hold, as in training (HeldJointPositionAction).
+                    speed = float(np.max(np.abs(self.data.qvel[dof])))
+                    due = self._leg_still_s >= hold_after - 0.5 * C.CONTROL_DT
+                    engage = still and not self._leg_held[i] and due and speed < hk.leg_hold_speed
+                    self._leg_held[i] = still and ((self._leg_held[i] and speed <= hk.leg_hold_release_speed)
+                                                   or engage)
+                    if engage:
+                        self._leg_hold_target[i] = target.copy()
+                    if self._leg_held[i]:
+                        target = self._leg_hold_target[i]
+                else:
+                    self._leg_held[i] = False
+            elif brake is not None:
+                # Low-speed brake at a zero command, as in training: a braked
+                # wheel (or any wheel once the timer ran out) lets go only
+                # above the wider limit.
+                limit = brake * ratio if ratio is not None and (self._braked[i] or timed_out) else brake
+                braked = idle and bool(np.all(np.abs(self.data.qvel[dof]) < limit))
+                if braked:
+                    target = np.zeros_like(target)
+                    if hold_kp:
+                        # Hold the angles the brake engaged at. The velocity
+                        # servo pushes kv (ctrl - dq), so a target of
+                        # kp / kv (q_hold - q), renewed every physics step, is
+                        # the motors' PD lock kp (q_hold - q) - kv dq.
+                        if not self._braked[i]:
+                            self._brake_hold[i] = self.data.qpos[qadr].copy()
+                        holds.append((ids, qadr, self._brake_hold[i],
+                                      hold_kp / self.model.actuator_gainprm[ids, 0]))
+                self._braked[i] = braked
             if not np.all(np.isfinite(target)):
                 raise FloatingPointError("policy actuator target is non-finite")
             self.data.ctrl[ids] = target
         t0 = time.perf_counter()
         for _ in range(C.PHYSICS_STEPS_PER_CONTROL):
+            for ids, qadr, held, gain in holds:
+                self.data.ctrl[ids] = gain * (held - self.data.qpos[qadr])
             mujoco.mj_step(self.model, self.data)
             if self.substep_hook is not None:
                 self.substep_hook(self.data)

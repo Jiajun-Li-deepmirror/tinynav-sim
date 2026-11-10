@@ -181,19 +181,37 @@ SCENES: dict[str, Scene] = {
         default_spawn="down",
         label="map3 楼梯井",
     ),
-    # MetaCam map_2 indoor (spirula_ba_s2 step-50000, 2.98M gaussians).
-    # Spawn = the gsplat-validated low-capture-band spot (map2_go2.json
-    # initial_qpos, yaw -11.49); ground top -1.20 from the spawn-footprint
-    # gaussian histogram -- see map2_scene.xml, recalibrate ground there
-    # AND here together by render.
-    "map2": Scene(
-        xml=ASSETS / "mjcf" / "map2_scene.xml",
-        collision=None,
-        catch_z=-2.6,
-        ply="map2_scene.ply",
-        spawns={"low": ((3.21, -5.54, -0.755), -11.49)},
-        default_spawn="low",
-        label="map2 室内",
+    # The unitree_rl_mjlab training pyramid stairs (2026-11-05, in map2's
+    # place; the user: "把仿真里的map2室内场景换成金字塔楼梯地形"): mjlab's
+    # pyramid / inverted-pyramid tiles (scripts/make_pyramid_scene.py ->
+    # pyramid_collision.xml), pits y 0..8 and pyramids y 8..16, rises 0.10 /
+    # 0.14 / 0.18 m at tread 0.32 (x 0..24) and 0.18 m at tread 0.25 (x
+    # 24..32). Spawns snap to the box tops below the hint z. map2's files
+    # (map2_scene.xml, model/splat/map2_scene.ply) are kept; its old entry:
+    # Scene(xml=ASSETS/"mjcf"/"map2_scene.xml", collision=None, catch_z=-2.6,
+    # ply="map2_scene.ply", spawns={"low": ((3.21, -5.54, -0.755), -11.49)},
+    # default_spawn="low", label="map2 室内").
+    "pyramid": Scene(
+        xml=ASSETS / "mjcf" / "pyramid_scene.xml",
+        collision=ASSETS / "mjcf" / "pyramid_collision.xml",
+        catch_z=-2.5,
+        ply="",
+        spawns={
+            # in a pit's centre facing +x: climb the steps out
+            "pit_10": ((4.0, 4.0, 0.0), 0.0),
+            "pit_14": ((12.0, 4.0, 0.0), 0.0),
+            "pit_18": ((20.0, 4.0, 0.0), 0.0),
+            "pit_18_narrow": ((28.0, 4.0, 0.0), 0.0),
+            # on a pyramid's top platform facing +x: walk down
+            "top_10": ((4.0, 12.0, 3.0), 0.0),
+            "top_14": ((12.0, 12.0, 3.0), 0.0),
+            "top_18": ((20.0, 12.0, 3.0), 0.0),
+            "top_18_narrow": ((28.0, 12.0, 3.0), 0.0),
+            # on the ground west of the 0.10 m pyramid facing it: climb up
+            "ground": ((-3.0, 12.0, 0.0), 0.0),
+        },
+        default_spawn="pit_14",
+        label="金字塔楼梯",
     ),
     # flat smoke terrain: procedural ground plane + go2 (build_flat_model),
     # no walls and no catch cliff -- the emu bench's long-run scene. The
@@ -660,8 +678,9 @@ def reset_to_spawn(model: mujoco.MjModel, data: mujoco.MjData, b: Bindings,
     root = b.root_qpos_adr
     drop = b.robot.spawn_drop
     sc = SCENES.get(b.scene_name, _ACTIVE)
-    if pos is None and sc.collision is None and sc.xml is not None:
-        # map2 and the like: their default spawn (a validated standing pose)
+    if pos is None and sc.xml is not None and (sc.collision is None or b.scene_name != "map3"):
+        # map2 and the like: their default spawn (a validated standing pose);
+        # the pyramid scene's too (map3 keeps SPAWN_XYZ below)
         pos, yaw_deg = sc.spawns[sc.default_spawn]
     if pos is not None:
         if sc.collision is not None:

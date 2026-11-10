@@ -39,9 +39,13 @@ def ticks(limit: AccelLimit, n: int) -> np.ndarray:
 
 
 class TestAccelLimit(unittest.TestCase):
+    def test_defaults(self):
+        limit = AccelLimit(Scripted())
+        self.assertEqual((limit.linear, limit.angular), (2.0, 3.0))
+
     def test_a_step_ramps_at_the_limit_both_ways(self):
         src = Scripted()
-        limit = AccelLimit(src)                      # 1.0 m/s², 50 Hz
+        limit = AccelLimit(src, linear=1.0, angular=2.0)   # 50 Hz
         src.cmd = (0.75, 0.0, 0.0)
         self.assertAlmostEqual(float(limit.vector()[0]), 0.02, places=6)
         self.assertAlmostEqual(float(ticks(limit, 36)[0]), 0.74, places=5)
@@ -52,7 +56,7 @@ class TestAccelLimit(unittest.TestCase):
 
     def test_vx_and_vy_share_the_linear_limit(self):
         src = Scripted()
-        limit = AccelLimit(src)
+        limit = AccelLimit(src, linear=1.0, angular=2.0)
         src.cmd = (1.0, 1.0, 0.0)
         out = limit.vector()
         self.assertAlmostEqual(float(np.hypot(out[0], out[1])), 0.02, places=6)
@@ -60,7 +64,7 @@ class TestAccelLimit(unittest.TestCase):
 
     def test_wz_has_its_own_limit(self):
         src = Scripted()
-        limit = AccelLimit(src)                      # 2.0 rad/s²
+        limit = AccelLimit(src, linear=1.0, angular=2.0)
         src.cmd = (0.01, 0.0, -1.0)
         out = limit.vector()
         self.assertAlmostEqual(float(out[2]), -0.04, places=6)
@@ -72,7 +76,7 @@ class TestAccelLimit(unittest.TestCase):
     def test_the_pads_b_stops_at_once(self):
         src = Scripted()
         held = [False]
-        limit = AccelLimit(src, brake=lambda: held[0])
+        limit = AccelLimit(src, linear=1.0, angular=2.0, brake=lambda: held[0])
         src.cmd = (1.0, 0.0, 0.5)
         ticks(limit, 100)
         held[0] = True                               # B held, a key still asks
@@ -83,14 +87,14 @@ class TestAccelLimit(unittest.TestCase):
 
     def test_the_base_source_passes_untouched(self):
         src = Scripted()
-        limit = AccelLimit(src, engaged=lambda: False)
+        limit = AccelLimit(src, linear=1.0, angular=2.0, engaged=lambda: False)
         src.cmd = (0.8, 0.0, -0.6)                   # hil: the stack's /cmd_vel
         np.testing.assert_allclose(limit.vector(), (0.8, 0.0, -0.6), atol=1e-7)
 
     def test_catches_up_with_the_base_source_after_teleop(self):
         src = Scripted()
         teleop = [True]
-        limit = AccelLimit(src, engaged=lambda: teleop[0])
+        limit = AccelLimit(src, linear=1.0, angular=2.0, engaged=lambda: teleop[0])
         src.cmd = (1.0, 0.0, 0.0)
         ticks(limit, 25)                             # 0.5 m/s
         teleop[0] = False                            # handed back to the stack
@@ -102,7 +106,7 @@ class TestAccelLimit(unittest.TestCase):
 
     def test_reset_ramps_up_from_zero(self):
         src = Scripted()
-        limit = AccelLimit(src)
+        limit = AccelLimit(src, linear=1.0, angular=2.0)
         src.cmd = (1.0, 0.0, 0.0)
         ticks(limit, 60)
         src.reset_edge = True
@@ -116,7 +120,7 @@ class TestWithTheKeyboard(unittest.TestCase):
         kb._input_poll = poll = FakePoll()
         kb.set_envelope(BLIND_LOW, BLIND_HIGH)       # Up at 50%: 0.75 m/s
         mux = K.KeyboardOverride(kb, K.ConstantCmd(vx=0.0))
-        limit = AccelLimit(mux, engaged=lambda: mux.state != "idle")
+        limit = AccelLimit(mux, engaged=lambda: mux.state != "idle", linear=1.0, angular=2.0)
         poll.held = {265}
         self.assertAlmostEqual(float(ticks(limit, 10)[0]), 0.2, places=5)
         self.assertEqual(float(ticks(limit, 30)[0]), 0.75)

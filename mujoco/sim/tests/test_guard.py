@@ -67,9 +67,9 @@ def stairs(first: float, rise: float, tread: float, n: int = 8):
             for i in range(n)]
 
 
-def distance(boxes, pitch_deg: float = 0.0):
+def distance(boxes, pitch_deg: float = 0.0, floor_z=None):
     return G.wall_distance(frame(boxes, pitch_deg), SPEC, np.zeros(3), camera_xmat(pitch_deg),
-                           (1.0, 0.0))
+                           (1.0, 0.0), floor_z)
 
 
 class TestWallDistance(unittest.TestCase):
@@ -99,6 +99,22 @@ class TestWallDistance(unittest.TestCase):
 
     def test_a_wall_under_the_minimum_range_is_unseen(self):
         self.assertIsNone(distance([wall(0.12)]))
+
+    def test_a_box_below_the_camera_with_the_feet_known(self):
+        # 0.30 m tall, its top 0.13 m under a Go2-height lens: under the camera band,
+        # seen once the band reaches down to the ground under the feet
+        box = ((0.7, -0.4, -CAMERA_HEIGHT), (1.2, 0.4, -CAMERA_HEIGHT + 0.30))
+        self.assertIsNone(distance([box]))
+        self.assertAlmostEqual(distance([box], floor_z=-CAMERA_HEIGHT), 0.7, delta=0.015)
+        # still no wall: the floor, a 10 cm kerb, map3's flights from the landing
+        kerb = ((0.7, -0.5, -CAMERA_HEIGHT), (1.1, 0.5, -CAMERA_HEIGHT + 0.10))
+        self.assertIsNone(distance([], floor_z=-CAMERA_HEIGHT))
+        self.assertIsNone(distance([kerb], floor_z=-CAMERA_HEIGHT))
+        for rise, tread in ((0.19, 0.22), (0.14, 0.30)):
+            for first in (0.1, 0.3, 0.6):
+                for pitch in (0.0, 30.0):
+                    self.assertIsNone(distance(stairs(first, rise, tread), pitch, floor_z=-CAMERA_HEIGHT),
+                                      (rise, tread, first, pitch))
 
 
 def fake_runtime(frame_m, distance_walked=0.0):

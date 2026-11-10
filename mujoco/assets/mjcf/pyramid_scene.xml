@@ -1,0 +1,32 @@
+<mujoco model="pyramid stairs">
+  <!-- The unitree_rl_mjlab training pyramid stairs (2026-11-05, in place of map2 in the scene registry; the user:
+       "把仿真里的map2室内场景换成金字塔楼梯地形"). timestep / iterations as map3's scene.xml (plant._apply_plant_options
+       forces the training dt anyway). No splat: the boxes are the visuals too.
+       pyramid_collision.xml (scripts/make_pyramid_scene.py, mjlab's own generators): a 4 x 2 grid of 8 m tiles,
+       row 0 (y 0..8) pits to climb out of, row 1 (y 8..16) pyramids to walk down, columns rise 0.10 / 0.14 / 0.18 m
+       at tread 0.32 and 0.18 m at tread 0.25 (x 0..32), inside a 6 m ground frame (top z = 0). The catch plane sits
+       below the deepest pit floor (-1.98). -->
+  <option gravity="0 0 -9.81" timestep="0.01" integrator="Euler" iterations="60" />
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+    <rgba haze="0.15 0.25 0.35 1" />
+    <global azimuth="120" elevation="-20" />
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.43 0.53 0.64" rgb2="0 0 0"
+             width="512" height="512" />
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.32 0.32 0.34" rgb2="0.24 0.24 0.26" markrgb="0.8 0.8 0.8"
+             width="300" height="300" />
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="10 10" />
+  </asset>
+
+  <worldbody>
+    <light pos="16 8 12" dir="-0.4 -0.3 -1" directional="true" />
+    <geom name="catch_floor" type="plane" pos="16 8 -2.5" size="0 0 0.05" material="groundplane"
+          contype="1" conaffinity="1" />
+    <include file="pyramid_collision.xml" />
+  </worldbody>
+</mujoco>

@@ -18,7 +18,7 @@ camera_info K is read back from the render pipeline after the contract
 fovy is applied, so camera_info and the rendered pixels never drift.
 
 Usage:
-    python hil.py 5070 [--scene map3|map2] [--spawn <scene's>]
+    python hil.py 5070 [--scene map3] [--spawn <scene's>]
         [--robot go2|go2w|as2|...] [--gamepad]
         [--cam-hz 10] [--vio-hz 100]
         [--imu-every 1]
@@ -73,7 +73,7 @@ from sim.plant import (  # noqa: E402
     reset_to_spawn,
     web_view_model,
 )
-from sim.policy import PieOnnxPolicy  # noqa: E402
+from sim.policy import PieOnnxPolicy, fallback_policy  # noqa: E402
 from sim.accel import AccelLimit  # noqa: E402
 from sim.gamepad import GamepadCmd, GamepadOverride  # noqa: E402
 from sim.guard import WallGuard  # noqa: E402
@@ -331,9 +331,10 @@ def main() -> int:
     _primary = (Path(policy_path) if policy_path
                 else robot.policy_path("perception"))
     policy = PieOnnxPolicy(_primary, provider="cpu")
+    # a navcore student gets the robot's blind policy as its depth fallback
     rt = PieRuntime(model, b, data, policy, policy_cam, cmd_mux,
                     spawn_pos=pos, spawn_yaw_deg=yaw_deg,
-                    substep_hook=sink.sample)
+                    substep_hook=sink.sample, fallback_policy=fallback_policy(robot))
     pad.set_envelope(*_pad_envelope(policy))
     kb.set_envelope(*_pad_envelope(policy))
     print(f"robot={robot.name} policy={_primary.name} "
@@ -351,7 +352,8 @@ def main() -> int:
     # control loop consumes.
     panel = None
     if web_scene is not None:
-        from webpanel import OperatorPanel, guard_status, march_status, sync_depth_camera
+        from webpanel import (OperatorPanel, fallback_status, guard_status, march_status,
+                              sync_depth_camera)
         if rt.uses_depth and not rt.depth_spec.pie:
             # a navcore student moved the camera: its pyramid follows
             sync_depth_camera(web_scene, model, rt.depth_spec)
@@ -529,7 +531,8 @@ def main() -> int:
                     old_rt = rt
                     rt = PieRuntime(model, b, data, policy, policy_cam, cmd_mux,
                                     spawn_pos=pos, spawn_yaw_deg=yaw_deg,
-                                    substep_hook=sink.sample)
+                                    substep_hook=sink.sample,
+                                    fallback_policy=fallback_policy(robot) if kind == "perception" else None)
                     old_rt.close()
                     if web_scene is not None and rt.uses_depth:
                         sync_depth_camera(web_scene, model, rt.depth_spec)
@@ -590,7 +593,8 @@ def main() -> int:
                         rt.depth_frame(),
                         f"{policy.contract.name} · cmd {rt.command[0]:+.2f} "
                         f"{rt.command[1]:+.2f} {rt.command[2]:+.2f} · 手柄{pad_txt}"
-                        + march_status(march, policy.contract) + guard_status(cmd_mux))
+                        + march_status(march, policy.contract) + guard_status(cmd_mux)
+                        + fallback_status(rt))
                     web_scene.show_camera_frustums = kind == "perception"
                 web_scene.update_from_mjdata(data)
                 t_view = now2

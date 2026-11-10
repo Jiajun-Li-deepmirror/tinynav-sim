@@ -13,16 +13,34 @@ reads the policy as trained:
       policy order (deploy.yaml actions joint_names; legged: unchanged)
   action_layout      joint_pos[position]*0.25:<legs>[;wheel_vel[velocity]*s:<wheels>]
   wheel_brake_rad_s  deploy.yaml brake_below_speed (wheel-legged)
+  wheel_brake_hold_kp, wheel_brake_release_ratio, wheel_brake_after_s
+                     deploy.yaml brake_hold_kp, brake_release_ratio,
+                     brake_after_s, where set (the wheeled finals of 2026-10-29)
+  wheel_brake_max_forward
+                     deploy.yaml brake_max_forward, where set (go2-blind's
+                     "brakeside": As2W / B2W from 2026-10-31)
+  leg_hold_after_s, leg_hold_speed, leg_hold_release_speed
+                     the legs' standstill hold, deploy.yaml joint_pos
+                     hold_after_s, hold_speed, hold_release_speed, where set
+                     (go2-blind's B2W polish 9000 of 2026-11-01, leghold20)
   gait_period, gait_ref_speed, gait_foot_xy, gait_march
                      the speed clock of deploy.yaml's gait_phase (go2-blind's
                      legged finals of 2026-10-27: ref_speed, foot_xy) and its
                      gait_march flag; absent for the fixed-clock exports
+  gait_drivable_max_lin_vel_y, gait_drivable_max_ang_vel_z
+                     gait_phase's drivable limits (wheeled finals of
+                     2026-10-29: no stepping clock where the wheels drive)
+  sim_cone, sim_impratio
+                     the contact solver it was trained with: params/env.yaml's
+                     sim.mujoco cone / impratio, else go2-blind's "grip" in
+                     blind_pilot.txt (elliptic, 10; pyramidal, 1 without it)
   source_md5         md5 of the go2-blind ONNX it came from
 
     python import_blind_policy.py <blind_v0 dir> <out.onnx>
 
 The directory holds exported/policy.onnx and params/deploy.yaml (go2-blind's
-deploy tree), or policy.onnx and deploy.yaml side by side (its hand-offs).
+deploy tree), or policy.onnx and deploy.yaml side by side (its hand-offs),
+with params/env.yaml or blind_pilot.txt beside them for the contact solver.
 Needs onnx and pyyaml (not sim dependencies).
 """
 from __future__ import annotations
@@ -38,6 +56,23 @@ import yaml
 
 def _csv(values) -> str:
     return ",".join(f"{float(v):.6g}" for v in values)
+
+
+def _solver(src: Path) -> dict[str, str]:
+    """The contact solver the policy was trained with (empty if unknown)."""
+    for env_path in (src / "params" / "env.yaml", src / "env.yaml"):
+        if env_path.exists():
+            # mjlab's dump holds python tags; only sim.mujoco is needed
+            mujoco_cfg = re.search(r"^sim:\n(?:  .*\n)*?  mujoco:\n((?:    .*\n)+)", env_path.read_text(), re.M)
+            if mujoco_cfg:
+                found = dict(re.findall(r"^    (cone|impratio): (\S+)$", mujoco_cfg.group(1), re.M))
+                if len(found) == 2:
+                    return {"sim_cone": found["cone"], "sim_impratio": f"{float(found['impratio']):.6g}"}
+    pilot = src / "blind_pilot.txt"
+    if pilot.exists():
+        grip = "grip" in pilot.read_text().strip().split(",")
+        return {"sim_cone": "elliptic" if grip else "pyramidal", "sim_impratio": "10" if grip else "1"}
+    return {}
 
 
 def import_policy(src: Path, out: Path) -> dict[str, str]:
@@ -85,8 +120,16 @@ def import_policy(src: Path, out: Path) -> dict[str, str]:
         "action_layout": ";".join(groups),
         "source_md5": hashlib.md5(onnx_path.read_bytes()).hexdigest(),
     })
+    if position is not None and position.get("hold_after_s") is not None:
+        meta["leg_hold_after_s"] = f"{float(position['hold_after_s']):.6g}"
+        meta["leg_hold_speed"] = f"{float(position.get('hold_speed', 0.1)):.6g}"
+        meta["leg_hold_release_speed"] = f"{float(position.get('hold_release_speed', 1.0)):.6g}"
     if velocity is not None:
         meta["wheel_brake_rad_s"] = f"{float(velocity['brake_below_speed']):.6g}"
+        for key, name in (("brake_hold_kp", "hold_kp"), ("brake_release_ratio", "release_ratio"),
+                          ("brake_after_s", "after_s"), ("brake_max_forward", "max_forward")):
+            if velocity.get(key) is not None:
+                meta[f"wheel_brake_{name}"] = f"{float(velocity[key]):.6g}"
     clock = (deploy.get("observations", {}).get("gait_phase") or {}).get("params") or {}
     if clock.get("ref_speed") is not None:
         # as written in deploy.yaml (B2's ref_speed 1.318333 has 7 digits)
@@ -96,6 +139,10 @@ def import_policy(src: Path, out: Path) -> dict[str, str]:
             meta["gait_foot_xy"] = ";".join(",".join(repr(float(v)) for v in foot)
                                             for foot in clock["foot_xy"])
         meta["gait_march"] = "1" if deploy.get("gait_march") else "0"
+        for key in ("drivable_max_lin_vel_y", "drivable_max_ang_vel_z"):
+            if clock.get(key) is not None:
+                meta[f"gait_{key}"] = repr(float(clock[key]))
+    meta.update(_solver(src))
     del model.metadata_props[:]
     for key, value in meta.items():
         model.metadata_props.add(key=key, value=value)
@@ -111,6 +158,7 @@ def main() -> None:
     args = parser.parse_args()
     meta = import_policy(args.src, args.out)
     print(f"{args.out}: {meta['action_layout'][:80]}... brake {meta.get('wheel_brake_rad_s')} "
+          f"hold kp {meta.get('wheel_brake_hold_kp')} solver {meta.get('sim_cone')}/{meta.get('sim_impratio')} "
           f"(from md5 {meta['source_md5'][:8]})")
 
 

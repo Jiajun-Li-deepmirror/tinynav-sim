@@ -257,6 +257,79 @@ class TestGaitClock(unittest.TestCase):
         self.assertEqual(clock.value, 0.0)
         np.testing.assert_allclose(clock((0.0, 0.0, 0.0), march=True), (0.0, 1.0))
 
+    def wheeled_finals_metadata(self) -> dict[str, str]:
+        meta = wheeled_metadata()
+        del meta["contract"]
+        meta.update({
+            "observation_names": "base_ang_vel,projected_gravity,command,joint_pos,"
+                                 "joint_vel,actions,heading_error,phase",
+            "gait_period": "0.6", "gait_ref_speed": "0.826783", "gait_march": "1",
+            "gait_foot_xy": "0.186,0.193;0.186,-0.193;-0.2,0.193;-0.2,-0.193",
+            "gait_drivable_max_lin_vel_y": "0.1", "gait_drivable_max_ang_vel_z": "0.03",
+            "wheel_brake_rad_s": "1.16279", "wheel_brake_hold_kp": "20",
+            "wheel_brake_release_ratio": "3", "wheel_brake_after_s": "1"})
+        return meta
+
+    def test_wheeled_finals(self):
+        """go2-blind's wheeled finals (2026-10-29): the phase last, no stepping
+        clock where the wheels drive, the brake's hold, release and timer."""
+        k = V.contract_for(self.wheeled_finals_metadata(), ["obs"])
+        self.assertIsInstance(k, V.BlindContract)
+        self.assertEqual(k.OBSERVATION_TERM_DIMS, (3, 3, 3, 12, 16, 16, 1, 2))
+        self.assertEqual(k.OBS_DIM, 56)
+        self.assertEqual((k.wheel_brake_hold_kp, k.wheel_brake_release_ratio,
+                          k.wheel_brake_after_s), (20.0, 3.0, 1.0))
+        obs = k.build_proprioception(
+            np.zeros(3), yaw_quat(0.0), np.zeros(3), k.default_joint_pos, np.zeros(16),
+            np.zeros(16), 0, heading_error=0.25, gait_phase=(0.5, -0.5))
+        np.testing.assert_allclose(obs[-3:], (0.25, 0.5, -0.5))
+        clock = k.GaitClock()
+        np.testing.assert_allclose(clock.drivable, (0.1, 0.03), rtol=1e-6)  # float32, as training compares
+        for _ in range(3):
+            np.testing.assert_allclose(clock((1.0, 0.1, 0.03)), 0.0)    # driving
+        self.assertGreater(abs(clock((1.0, 0.0, 0.5))).max(), 0.5)       # turning: steps
+        self.assertGreater(abs(clock((0.0, 0.3, 0.0))).max(), 0.5)       # sideways: steps
+        self.assertGreater(abs(clock((0.0, 0.0, 0.0), march=True)).max(), 0.5)
+        # the legged clock has no drivable limits
+        self.assertIsNone(V.contract_for(self.speed_clock_metadata(), ["obs"]).GaitClock().drivable)
+
+    def test_brake_timer_needs_the_release_ratio(self):
+        meta = self.wheeled_finals_metadata()
+        del meta["wheel_brake_release_ratio"]
+        with self.assertRaises(ValueError):
+            V.contract_for(meta, ["obs"])
+
+    def test_phase_only_moves_to_the_end(self):
+        meta = self.wheeled_finals_metadata()
+        meta["observation_names"] = ("base_ang_vel,projected_gravity,command,joint_pos,"
+                                     "joint_vel,phase,actions,heading_error")
+        with self.assertRaises(ValueError):
+            V.contract_for(meta, ["obs"])
+
+    def test_brake_max_forward(self):
+        meta = self.wheeled_finals_metadata() | {"wheel_brake_max_forward": "0.05"}
+        self.assertEqual(V.contract_for(meta, ["obs"]).wheel_brake_max_forward, 0.05)
+        self.assertIsNone(V.contract_for(self.wheeled_finals_metadata(), ["obs"]).wheel_brake_max_forward)
+
+    def test_leg_hold(self):
+        meta = self.wheeled_finals_metadata() | {"leg_hold_after_s": "2", "leg_hold_speed": "0.1",
+                                                 "leg_hold_release_speed": "1"}
+        k = V.contract_for(meta, ["obs"])
+        self.assertEqual((k.leg_hold_after_s, k.leg_hold_speed, k.leg_hold_release_speed), (2.0, 0.1, 1.0))
+        k = V.contract_for(self.wheeled_finals_metadata(), ["obs"])
+        self.assertIsNone(k.leg_hold_after_s)
+        with self.assertRaises(ValueError):
+            V.contract_for(meta | {"leg_hold_speed": ""}, ["obs"])
+
+    def test_contact_solver(self):
+        meta = self.wheeled_finals_metadata() | {"sim_cone": "elliptic", "sim_impratio": "10"}
+        k = V.contract_for(meta, ["obs"])
+        self.assertEqual((k.sim_cone, k.sim_impratio), ("elliptic", 10.0))
+        k = V.contract_for(self.wheeled_finals_metadata(), ["obs"])
+        self.assertEqual((k.sim_cone, k.sim_impratio), (None, None))   # MuJoCo's defaults
+        with self.assertRaises(ValueError):
+            V.contract_for(meta | {"sim_cone": "elipse"}, ["obs"])
+
 
 NAVCORE_META = {"depth_camera": "navcore", "depth_camera_body": "base_link",
                 "depth_camera_pos": "0.307,0.05,0.1273",
@@ -289,6 +362,32 @@ class TestNavcoreDepth(unittest.TestCase):
         with self.assertRaises(ValueError):      # a v3 student without its term
             V.StudentContract(heading_metadata("go2_depth_v3")
                               | {"observation_names": ",".join(V.OBSERVATION_NAMES)})
+
+    def test_v4_wheeled_student(self):
+        """go2-blind's wheeled finals' students (b2w_depth_v4, 2026-10-29): the
+        v3 inputs on a wheel-legged robot, legs then wheels in joint_names (the
+        order joint_vel reads them), the brake and the drivable clock."""
+        legs = [j for j in WHEELED if "wheel" not in j]
+        wheels = [j for j in WHEELED if "wheel" in j]
+        meta = wheeled_metadata() | NAVCORE_META | {
+            "contract": "b2w_depth_v4", "joint_names": ",".join(legs + wheels),
+            "default_joint_pos": ",".join(["0", "0.8", "-1.5"] * 4 + ["0"] * 4),
+            "observation_names": ",".join(V.OBSERVATION_NAMES + (V.HEADING_TERM,)),
+            "gait_period": "0.6", "gait_ref_speed": "1.3183", "gait_march": "1",
+            "gait_drivable_max_lin_vel_y": "0.1", "gait_drivable_max_ang_vel_z": "0.03",
+            "wheel_brake_rad_s": "0.884956", "wheel_brake_hold_kp": "40",
+            "wheel_brake_release_ratio": "3", "wheel_brake_after_s": "1",
+            "sim_cone": "elliptic", "sim_impratio": "10"}
+        k = V.contract_for(meta)
+        self.assertEqual(k.OBSERVATION_TERM_DIMS, (3, 3, 3, 2, 12, 16, 16, 1))
+        self.assertEqual(k.joint_names, tuple(legs + wheels))
+        np.testing.assert_allclose(k.GaitClock().drivable, (0.1, 0.03), rtol=1e-6)  # float32, as training compares
+        self.assertEqual(k.depth.frame_shape, (80, 68))
+        np.testing.assert_allclose(k.COMMAND_HIGH, V.BLIND_COMMAND_HIGH)   # blind envelope
+        obs = k.build_proprioception(
+            np.zeros(3), yaw_quat(0.0), np.zeros(3), k.default_joint_pos, np.arange(16.0),
+            np.zeros(16), 0, heading_error=0.0, gait_phase=(0.0, 0.0))
+        np.testing.assert_allclose(obs[23:39], np.arange(16.0))   # joint_vel in that order
 
     def test_exports_without_camera_metadata_are_pie(self):
         d = V.contract_for(heading_metadata()).depth

@@ -4,7 +4,7 @@ face (docs/multi-robot-sim-testbench.md §5). Production pilot code connects
 unmodified over loopback; the emu answers sport RPCs with per-model FSM
 gating and streams state topics at a bench-friendly rate (20 Hz default).
 
-    python3 dog.py --profile as2 --iface lo [--scene map2] [--state-hz 20]
+    python3 dog.py --profile as2 --iface lo [--scene map3] [--state-hz 20]
         [--view web [--web-port 8013]]
         [--contract]
 
@@ -287,7 +287,7 @@ def main() -> int:
         if not sc.ply:
             raise SystemExit(
                 f"scene {args.scene!r} has no splat ply -- contract face "
-                "needs map3|map2")
+                "needs a splat scene (map3)")
         mounts = _measure_camera_mounts(model, data, b)
         ring = EmuStateRing()
         face_proc = _spawn_contract_face(

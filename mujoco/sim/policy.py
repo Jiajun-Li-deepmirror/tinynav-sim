@@ -229,4 +229,11 @@ class PieOnnxPolicy:
         return action.reshape(self.contract.NUM_ACTIONS)
 
 
-__all__ = ["PieOnnxPolicy", "resolve_onnx_path"]
+def fallback_policy(robot) -> "PieOnnxPolicy | None":
+    """The robot's blind policy, for a navcore student's depth fallback
+    (PieRuntime fallback_policy), or None when it has none."""
+    path = robot.policy_path("blind")
+    return PieOnnxPolicy(path, provider="cpu") if path is not None and path.is_file() else None
+
+
+__all__ = ["PieOnnxPolicy", "fallback_policy", "resolve_onnx_path"]

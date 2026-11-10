@@ -4,8 +4,8 @@
 tinynav-sim's own controls (the vendored mjviser under webviewer/ stays
 untouched), drawn above its Scene / Visualization / Groups tabs:
 
-  Map             the scene registry (sim/plant.py SCENES: map3 楼梯井, map2
-                  室内, flat 平地); a switch rebuilds the robot in the new map at
+  Map             the scene registry (sim/plant.py SCENES: map3 楼梯井, pyramid
+                  金字塔楼梯, flat 平地); a switch rebuilds the robot in the new map at
                   its spawn and frames every page behind it again
   Robot           registry robots that have a body and a policy
                   (sim/robots.py); the others are listed with what they miss
@@ -24,22 +24,44 @@ untouched), drawn above its Scene / Visualization / Groups tabs:
   Wall guard      no forward speed into a wall the policy's depth camera sees
                   (sim/guard.py, default on): slows down and stands ~0.5 m in
                   front of it; the status line says when it cuts the command
+  Depth fallback  a navcore student hands the robot to its blind policy
+                  while its depth frame is untrustworthy -- something filling
+                  the view up close, or a covered lens (sim/depth_monitor.py,
+                  default on); the status line says when the blind policy drives
   Keyboard speed  held teleop keys drive this share of the active policy's
                   training command range (sim/keyboard.py, default 50%)
   Max accel       the keyboard's and the gamepad's command changes at most
   Max yaw accel   this fast: m/s² for vx and vy together, rad/s² for wz,
                   speeding up and braking alike; the pad's B still stops at
-                  once (sim/accel.py, default 1.0 / 2.0)
+                  once (sim/accel.py, default 2.0 / 3.0)
   controls        one line: the teleop keys with their current speeds
+  踏步复位         sim/posture.py, the real controller's posture reset (ThermalGuard):
+                  1 s into a stop a leg joint 0.15 rad off the default stance
+                  marches in place 2 s, twice per stop at most; on as the robot's
+                  config.yaml has it (Go2-W); the status line shows 站姿偏 (the
+                  leg joints' largest distance from the default, rad)
   Reset / Stop    the native viewer's R / Space
   policy depth    the policy's newest depth frame (perception only; PIE's
                   60x86, a navcore student's 80x68 portrait), turbo map:
                   near red, its max range (3 m) and beyond dark blue, like
                   what navcore cannot see (nearer than 0.15 m)
-  Hip temperature the four hip motors' estimated winding temperatures
-                  (sim/thermal.py: from the simulated joint torques,
-                  parameters not identified on the robot), live over the last
-                  TEMP_WINDOW_S like a monitor trace
+  Payload         负载 kg / COM x, y, z: a point mass on the base at that
+                  point (base frame), as the acceptance's payload tests and
+                  training's base_payload_point add it (mass, centre of mass
+                  and inertia of base_link); ranges are the robot's training
+                  limits (PAYLOAD_LIMITS). 显示质心: an orange sphere at the
+                  payload point, a green one at the whole robot's centre of
+                  mass (subtree COM of the base)
+  地面摩擦 μ       the feet's (wheels') friction on every floor (they have contact
+                  priority), default FRICTION_DEFAULT; acceptance runs keep 0.6
+  静摩擦（无蠕滑）   MuJoCo noslip (NOSLIP_ITERATIONS) on, default: feet within the friction
+                  cone do not creep (2026-11-10, the user: standing feet slid apart and the
+                  hips kept opening, also after the posture reset)
+  Hip angle       the four hip joints' angle minus the policy's default (deg,
+                  away from the body +: the real controller's thermal CSV
+                  hip*_out_deg), live over the last TEMP_WINDOW_S like a
+                  monitor trace (2026-11-10, the user: instead of the
+                  estimated hip temperatures)
 
 The depth policy's camera is drawn on the robot as a small pyramid while
 the perception policy drives (apex at the lens, opening = what the policy
@@ -59,6 +81,17 @@ from collections import deque
 
 import numpy as np
 
+# Payload sliders (2026-11-10): the training limits of each robot (go2-depth
+# fe_robot.sh BLIND_PAYLOAD: max kg, |x|, |y|, z top in the base frame)
+PAYLOAD_LIMITS = {
+    "go2": (12.0, 0.15, 0.08, 0.20), "go2w": (12.0, 0.15, 0.08, 0.20),
+    "as2": (10.0, 0.15, 0.08, 0.20), "as2w": (13.0, 0.15, 0.08, 0.20),
+    "b2": (40.0, 0.30, 0.15, 0.30), "b2w": (40.0, 0.30, 0.15, 0.30),
+}
+PAYLOAD_DEFAULT_LIMITS = (12.0, 0.15, 0.08, 0.20)
+FRICTION_DEFAULT = 0.8   # the web view's floor friction (2026-11-10, the user: the floor felt
+                         # too slippery for an office's wood floor or carpet; carpet ~0.8)
+
 FRAME_DISTANCE = 1.5      # m, a new page's camera from the base ...
 FRAME_LENGTHS = 1.8       # ... or this many robot lengths, given one
 FRAME_PITCH_DEG = 30.0    # behind the robot, looking down
@@ -75,7 +108,7 @@ STATUS_HZ = 10.0          # status line (cmd, upright, gamepad)
 DEPTH_CAMERA_LENGTHS = 0.2   # the depth camera's pyramid: this many robot
 DEPTH_CAMERA_DEPTH = 0.15    # lengths deep, or this many m without one
 DEPTH_CAMERA_RGB = (40, 160, 255)
-TEMP_HZ = 10.0             # hip temperature trace: points per second ...
+TEMP_HZ = 10.0             # hip angle trace: points per second ...
 TEMP_WINDOW_S = 20.0       # ... over a fixed window this long (s)
 TEMP_COLORS = {"FL": "#e6550d", "FR": "#3182bd", "RL": "#fdae6b", "RR": "#9ecae1"}
 
@@ -140,6 +173,15 @@ def guard_status(guard) -> str:
     if guard is None or not guard.limiting:
         return ""
     return f" · 前方墙 {guard.distance:.2f} m，限速"
+
+
+def fallback_status(rt) -> str:
+    """Status-line suffix while the blind policy drives for a navcore student
+    (sim/runtime.py depth fallback)."""
+    if not getattr(rt, "fallback_active", False):
+        return ""
+    reason = {"near": "近处遮挡", "blind": "看不见"}.get(rt.monitor.fault, rt.monitor.fault)
+    return f" · 相机异常（{reason}），盲走接管"
 
 
 def depth_note(shape) -> str:
@@ -256,13 +298,14 @@ class SightKeeper:
 
 class OperatorPanel:
     def __init__(self, server, robots, robot: str, *, gamepad=None,
-                 keyboard=None, accel=None, guard=None, on_button=None,
+                 keyboard=None, accel=None, guard=None, fallback=None, on_button=None,
                  robot_select: bool = True, scenes: dict[str, str] | None = None,
                  scene: str | None = None) -> None:
         """robots: {name: sim.robots.Robot}; robot: the one being driven.
         keyboard: the host's sim.keyboard.HoldCmd (its envelope already set).
         accel: the host's sim.accel.AccelLimit over its teleop commands;
-        guard: its sim.guard.WallGuard.
+        guard: its sim.guard.WallGuard; fallback: its depth-fallback switch
+        (an object with a settable `enabled`, view.FallbackSwitch).
         on_button("reset" | "stop") is called from viser's thread.
         robot_select=False shows the robot without the dropdown (hosts that
         cannot swap bodies at runtime). scenes: {name: label} of the maps a
@@ -274,6 +317,7 @@ class OperatorPanel:
         self.keyboard = keyboard
         self.accel = accel
         self.guard = guard
+        self.fallback = fallback
         # viewer = Rz(scene_yaw) (world + scene_offset); hosts draw the
         # scene with it
         self.scene_offset = np.zeros(3)
@@ -284,6 +328,7 @@ class OperatorPanel:
         self._frame_distance = FRAME_DISTANCE
         self._lock = threading.Lock()
         self._request: tuple[str, str | bool] | None = None
+        self._payload_req: tuple[float, float, float, float, bool] | None = None
         self._loading: list = []   # "switching robot" spinners, one per client
         self._to_frame: set[int] = set()   # new pages, framed on the next update
         self._aim = False          # Track robot just turned on
@@ -347,6 +392,21 @@ class OperatorPanel:
                          "of it (the depth students try to climb walls). "
                          "Backing off and turning stay free.")
                 self.guard_cb.on_update(self._on_guard)
+            if fallback is not None:
+                self.fallback_cb = gui.add_checkbox(
+                    "Depth fallback", fallback.enabled,
+                    hint="When something fills the depth camera's view up close, or "
+                         "the lens is covered, the robot's blind policy drives until "
+                         "the frame has been normal for 1 s (perception only).")
+                self.fallback_cb.on_update(self._on_fallback)
+            self.posture_cb = gui.add_checkbox(
+                "踏步复位", False,
+                hint="As on the robot (its config.yaml ThermalGuard posture_march_rad): 1 s into a "
+                     "stop, a leg joint more than 0.15 rad off the default stance marches in place "
+                     "2 s, at most twice per stop. Starts as the robot is set (Go2-W on); policies "
+                     "that cannot march ignore it.")
+            self.posture_cb.on_update(self._on_posture)
+            self._posture_req: bool | None = None
             for label, name in (("Reset to spawn", "reset"), ("Stop", "stop")):
                 btn = gui.add_button(label)
                 btn.on_click(lambda _e, _n=name: on_button and on_button(_n))
@@ -379,10 +439,49 @@ class OperatorPanel:
                 label="Policy depth", format="jpeg", jpeg_quality=85)
             self._depth_shape = (60, 86)
             self.depth_note = gui.add_markdown(depth_note(self._depth_shape))
+        lim = PAYLOAD_LIMITS.get(robot, PAYLOAD_DEFAULT_LIMITS)
+        with gui.add_folder("Payload 负载", order=-0.95):
+            self.pay_kg = gui.add_slider(
+                "负载 kg", min=0.0, max=lim[0], step=0.5, initial_value=0.0,
+                hint="A point mass on the base (the payload tests' and training's): "
+                     "0 to the robot's training limit.")
+            self.pay_x = gui.add_slider(
+                "COM x (前+)", min=-lim[1], max=lim[1], step=0.01, initial_value=0.0,
+                hint="m, the payload's point along the body (forward +), base frame.")
+            self.pay_y = gui.add_slider(
+                "COM y (左+)", min=-lim[2], max=lim[2], step=0.01, initial_value=0.0,
+                hint="m, sideways (left +), base frame.")
+            self.pay_z = gui.add_slider(
+                "COM z (上+)", min=0.0, max=lim[3], step=0.01, initial_value=0.0,
+                hint="m, above the base's origin.")
+            self.pay_show = gui.add_checkbox(
+                "显示质心", True,
+                hint="Orange: the payload point. Green: the whole robot's centre "
+                     "of mass, payload included.")
+            for w in (self.pay_kg, self.pay_x, self.pay_y, self.pay_z, self.pay_show):
+                w.on_update(self._on_payload)
+            self.friction = gui.add_slider(
+                "地面摩擦 μ", min=0.3, max=1.2, step=0.05, initial_value=FRICTION_DEFAULT,
+                hint="The feet's (wheels') sliding friction on every floor and stair: the foot "
+                     "geoms have contact priority, so theirs is the one used. Carpet ~0.8 "
+                     "(measured, a robot foot); office wood / laminate no reliable rubber "
+                     "figure, ~0.5-0.7; training draws 0.3-1.6 (wheeled stairs 0.4-1.0); "
+                     "the tinynav acceptance keeps 0.6.")
+            self.friction.on_update(self._on_friction)
+            self._friction_req: float | None = None
+            self.noslip = gui.add_checkbox(
+                "静摩擦（无蠕滑）", True,
+                hint="MuJoCo's noslip solver (10 iterations): a foot held within the friction cone "
+                     "does not slide, as rubber on a floor. Off: MuJoCo's soft contact lets a "
+                     "standing robot's feet creep apart (Go2 12 kg: rear feet +15 cm, hips +15 deg "
+                     "out in 30 s at |Ft|/Fn 0.16, far inside 0.6); training (mujoco_warp) has no "
+                     "noslip, so it trained with that creep. The tinynav acceptance runs without it.")
+            self.noslip.on_update(self._on_noslip)
+            self._noslip_req: bool | None = None
         from viser import uplot
         self._temp: deque[tuple[float, np.ndarray]] = deque()
         self._t_temp = -math.inf
-        with gui.add_folder("Hip temperature (est.)", order=-0.9):
+        with gui.add_folder("髋角 − 默认 (外展+)", order=-0.9):
             self.temp_now = gui.add_markdown("")
             # x = seconds before now, over a fixed window: a monitor trace
             self.temp_plot = gui.add_uplot(
@@ -392,7 +491,7 @@ class OperatorPanel:
                    for leg, color in TEMP_COLORS.items())),
                 scales={"x": uplot.Scale(time=False, auto=False, range=(-TEMP_WINDOW_S, 0.0)),
                         "y": uplot.Scale(auto=True)},
-                axes=(uplot.Axis(), uplot.Axis(label="°C")),
+                axes=(uplot.Axis(), uplot.Axis(label="°")),
                 legend=uplot.Legend(show=False),
                 aspect=1.6)
         server.on_client_connect(self._frame_new_client)
@@ -432,6 +531,82 @@ class OperatorPanel:
             with self._lock:
                 self._request = ("perception", bool(self.perception.value))
 
+    def _on_payload(self, _event) -> None:
+        if self._quiet:
+            return
+        with self._lock:
+            self._payload_req = (float(self.pay_kg.value), float(self.pay_x.value),
+                                 float(self.pay_y.value), float(self.pay_z.value),
+                                 bool(self.pay_show.value))
+
+    def _on_friction(self, _event) -> None:
+        if not self._quiet:
+            with self._lock:
+                self._friction_req = float(self.friction.value)
+
+    def _on_noslip(self, _event) -> None:
+        if not self._quiet:
+            with self._lock:
+                self._noslip_req = bool(self.noslip.value)
+
+    def take_noslip(self):
+        """The 静摩擦 checkbox after it changed, else None (control thread)."""
+        with self._lock:
+            req, self._noslip_req = self._noslip_req, None
+        return req
+
+    def take_friction(self):
+        """The 地面摩擦 slider's value after it moved, else None (control thread)."""
+        with self._lock:
+            req, self._friction_req = self._friction_req, None
+        return req
+
+    def payload(self) -> tuple[float, float, float, float, bool]:
+        """The sliders' payload (kg, x, y, z, show) as they stand."""
+        return (float(self.pay_kg.value), float(self.pay_x.value), float(self.pay_y.value),
+                float(self.pay_z.value), bool(self.pay_show.value))
+
+    def take_payload(self):
+        """(kg, x, y, z, show) after a slider moved, else None (control thread)."""
+        with self._lock:
+            req, self._payload_req = self._payload_req, None
+        return req
+
+    def _payload_ranges(self, robot: str) -> None:
+        """The sliders' ranges for `robot` (its training limits), values clamped
+        into them; a clamped value queues the payload again. Under _quiet."""
+        lim = PAYLOAD_LIMITS.get(robot, PAYLOAD_DEFAULT_LIMITS)
+        before = self.payload()
+        for w, lo, hi in ((self.pay_kg, 0.0, lim[0]), (self.pay_x, -lim[1], lim[1]),
+                          (self.pay_y, -lim[2], lim[2]), (self.pay_z, 0.0, lim[3])):
+            try:
+                w.min, w.max = lo, hi
+            except Exception:      # noqa: BLE001 -- an older viser: fixed ranges
+                pass
+            w.value = min(max(float(w.value), lo), hi)
+        if self.payload() != before:
+            with self._lock:
+                self._payload_req = self.payload()
+
+    def _on_posture(self, _event) -> None:
+        if not self._quiet:
+            with self._lock:
+                self._posture_req = bool(self.posture_cb.value)
+
+    def take_posture(self):
+        """The 踏步复位 checkbox after the operator changed it, else None."""
+        with self._lock:
+            req, self._posture_req = self._posture_req, None
+        return req
+
+    def show_posture(self, on: bool) -> None:
+        """Reflect the robot's own posture-reset setting (after a switch)."""
+        self._quiet = True
+        try:
+            self.posture_cb.value = bool(on)
+        finally:
+            self._quiet = False
+
     def _on_gamepad(self, _event) -> None:
         if self.gamepad is not None and not self._quiet:
             self.gamepad.enabled = bool(self.pad_cb.value)
@@ -450,6 +625,9 @@ class OperatorPanel:
 
     def _on_guard(self, _event) -> None:
         self.guard.enabled = bool(self.guard_cb.value)
+
+    def _on_fallback(self, _event) -> None:
+        self.fallback.enabled = bool(self.fallback_cb.value)
 
     def _keys_text(self) -> str:
         if self.keyboard is not None:
@@ -500,6 +678,7 @@ class OperatorPanel:
                 f"{'blind' if has_perception else 'depth'} policy yet")
             self.depth.visible = self.depth_note.visible = perception
             self.keys.content = self._keys_text()   # the new policy's range
+            self._payload_ranges(robot)
         finally:
             self._quiet = False
         # open pages keep their camera: a switch keeps the robot's place
@@ -562,13 +741,14 @@ class OperatorPanel:
             self._aim = True
 
     def reset_temperatures(self) -> None:
-        """A new robot: the hip temperature trace starts over."""
+        """A new robot: the hip angle trace starts over."""
         self._temp.clear()
         self._t_temp = -math.inf
 
     def plot_temperatures(self, t: float, labels, temps) -> None:
         """Per control tick: t (s, sim time), the hips' labels (FL, FR, RL,
-        RR) and temperatures (deg C); drawn at TEMP_HZ over the last
+        RR) and values (the hip angle off its default, deg; the name is
+        the old temperature trace's); drawn at TEMP_HZ over the last
         TEMP_WINDOW_S, x = seconds before now."""
         if t - self._t_temp < 1.0 / TEMP_HZ - 1e-9:
             return
@@ -581,8 +761,8 @@ class OperatorPanel:
         self.temp_plot.data = (times, *np.stack([v for _, v in self._temp], axis=1))
         # the legend: each leg's number in its trace's colour
         self.temp_now.content = "<small>" + " · ".join(
-            f'<b style="color:{color}">{leg}</b> {values[leg]:.1f}'
-            for leg, color in TEMP_COLORS.items() if leg in values) + " °C</small>"
+            f'<b style="color:{color}">{leg}</b> {values[leg]:+.1f}'
+            for leg, color in TEMP_COLORS.items() if leg in values) + " °</small>"
 
     def _follow_cameras(self, new: set, aim: bool, robot, yaw: float,
                         tracking: bool, ray, dt: float) -> None:

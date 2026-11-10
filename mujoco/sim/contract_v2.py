@@ -13,7 +13,8 @@ one class serves every robot:
 
 in that order, minus the terms the metadata `observation_names` leaves out
 (the wheel-legged v2 exports have no phase: 53-D), plus heading_error(1) last
-for the heading students (contract `<contract>_heading`, below).
+for the heading students (contract `<contract>_heading`, below). go2-blind's
+wheeled finals (2026-10-29) list the phase last, after heading_error.
 
 J = metadata joint_names (every joint, model order), P = the position-
 controlled joints of action_layout (legs; relative to the default pose --
@@ -29,12 +30,42 @@ Mirrors unitree_rl_mjlab src/tasks/velocity/mdp/observations.py::phase.
 Exports with metadata `gait_ref_speed` (go2-blind's legged finals of
 2026-10-27 and the students distilled from them) run a speed clock instead
 (GaitClock): the period shortens above the reference speed and the phase
-advances every control step, as go2-blind's mdp.gait_clock.
+advances every control step, as go2-blind's mdp.gait_clock. With
+`gait_drivable_max_lin_vel_y` and `gait_drivable_max_ang_vel_z` (go2-blind's
+wheeled finals of 2026-10-29) the phase also reads zero under a command the
+wheels drive (|vy| and |wz| within those), so the clock runs only where the
+robot steps -- unless it marches in place.
 
 Wheel brake (metadata `wheel_brake_rad_s`, wheel-legged v2): with the shaped
 command zero and every velocity-controlled joint slower than that, the
-velocity targets are zero (unitree_rl_mjlab mdp/wheel_action.py; applied by
-the runtime).
+velocity targets are zero (unitree_rl_mjlab mdp/actions.py
+BrakedJointVelocityAction; applied by the runtime). With `wheel_brake_hold_kp`
+(Nm/rad; go2-blind deploy.yaml brake_hold_kp) the brake also holds each wheel
+at the angle it had when the brake engaged, tau = kp (q_hold - q) - kd dq, as
+the motors' own PD does on the robot: a damping-only brake let the wheeled
+robots roll down stairs. With `wheel_brake_release_ratio` a braked wheel lets
+go only above that times the brake speed, and with `wheel_brake_after_s` that
+wider limit also applies once the command has been zero that long
+(deploy.yaml brake_release_ratio, brake_after_s). With `wheel_brake_max_forward`
+(go2-blind's "brakeside") the brake, and its timer, also work while the forward
+command is at most that (stepping sideways, turning in place), not only at a zero
+command (deploy.yaml brake_max_forward).
+
+Leg hold (metadata `leg_hold_after_s`, `leg_hold_speed`, `leg_hold_release_speed`;
+go2-blind's B2W polish 9000 of 2026-11-01, trained with it): once the shaped
+command has been zero (not marching in place) for leg_hold_after_s and every
+position-controlled joint turns slower than leg_hold_speed, the position
+targets stay at that step's; they follow the policy again when the command
+leaves zero, the robot marches, or a joint turns faster than
+leg_hold_release_speed (unitree_rl_mjlab mdp/actions.py
+HeldJointPositionAction; applied by the runtime, for the policy that drives).
+
+Contact solver (metadata `sim_cone`, `sim_impratio`): the friction cone and
+impratio the policy was trained with -- go2-blind's "grip" (2026-10-24) trains
+on an elliptic cone at impratio 10, under which wheels and feet do not slide
+apart under a steady sideways load the way they do on MuJoCo's default
+pyramidal cone at impratio 1. The runtime sets them on the model when it binds
+the policy; without the keys, MuJoCo's defaults.
 
 Heading students (unitree_rl_mjlab Unitree-<Robot>-Depth-Student-Heading,
 contract `<student contract>_heading`, e.g. go2_depth_v2_heading): trained
@@ -84,8 +115,11 @@ HEADING_CONTRACTS = tuple(
 # Students of go2-blind's legged finals (unitree_rl_mjlab depth-blind, 2026-10-27):
 # the heading students' inputs with the speed clock and hip-0 stance of their
 # blind teachers, and navcore's camera (its frame and mount in the metadata,
-# DepthSpec).
-NAVCORE_CONTRACTS = ("go2_depth_v3", "as2_depth_v3", "b2_depth_v3")
+# DepthSpec). The wheeled ones (*_depth_v4, 2026-10-29) are distilled from
+# go2-blind's wheeled finals: the same inputs, with their brake and drivable
+# clock in the metadata.
+NAVCORE_CONTRACTS = ("go2_depth_v3", "as2_depth_v3", "b2_depth_v3",
+                     "go2w_depth_v4", "b2w_depth_v4", "as2w_depth_v4")
 # A stereo camera reads nothing nearer than its minimum range: training's
 # real-camera randomization (depth_env_cfg REAL_CAMERA_DEPTH min_range_m) draws
 # it per episode from 0.05-0.15 m and reads those pixels as misses. The sim
@@ -229,14 +263,18 @@ class GaitClock:
     nominal base-frame xy: |(vx - wz y, vy + wz x)|; planar command speed
     without it). The phase is 0 at the first control step after a reset and
     advances CONTROL_DT over the period of each later step's command; it
-    reads zero below the command deadzone unless the robot marches in place.
-    Call once per control step."""
+    reads zero below the command deadzone, and with `drivable` (max |vy|,
+    max |wz|: wheeled) also under a command the wheels drive, unless the robot
+    marches in place. Call once per control step."""
 
     def __init__(self, period: float, ref_speed: float,
-                 foot_xy: np.ndarray | None = None) -> None:
+                 foot_xy: np.ndarray | None = None,
+                 drivable: tuple[float, float] | None = None) -> None:
         self.period = float(period)
         self.ref_speed = float(ref_speed)
         self.foot_xy = None if foot_xy is None else np.asarray(foot_xy, np.float64).reshape(-1, 2)
+        # float32, as training compares its float32 commands
+        self.drivable = None if drivable is None else tuple(np.float32(v) for v in drivable)
         self.reset()
 
     def reset(self) -> None:
@@ -255,7 +293,12 @@ class GaitClock:
         if self._started:
             self.value = (self.value + CONTROL_DT / self.current_period(command)) % 1.0
         self._started = True
-        if float(np.linalg.norm(np.asarray(command, dtype=np.float32))) < COMMAND_DEADZONE and not march:
+        command = np.asarray(command, dtype=np.float32).reshape(3)
+        standing = float(np.linalg.norm(command)) < COMMAND_DEADZONE
+        if self.drivable is not None:
+            standing = standing or bool(abs(command[1]) <= self.drivable[0]
+                                        and abs(command[2]) <= self.drivable[1])
+        if standing and not march:
             return np.zeros(2, dtype=np.float32)
         return np.asarray((math.sin(2.0 * math.pi * self.value),
                            math.cos(2.0 * math.pi * self.value)), dtype=np.float32)
@@ -375,7 +418,10 @@ class StudentContract:
         names = tuple(filter(None, metadata.get(
             "observation_names", ",".join(OBSERVATION_NAMES)).split(",")))
         known = OBSERVATION_NAMES + (HEADING_TERM,)
-        if [n for n in known if n in names] != list(names):
+        # in this order, or with the phase last (go2-blind's wheeled finals of
+        # 2026-10-29, as their deploy.yaml lists the terms)
+        orders = (known, tuple(n for n in known if n != "phase") + ("phase",))
+        if all([n for n in order if n in names] != list(names) for order in orders):
             raise ValueError(f"Unsupported observation terms {names}.")
         self.heading = HEADING_TERM in names
         if self.heading != (self.name in HEADING_CONTRACTS + NAVCORE_CONTRACTS) and name is None:
@@ -388,6 +434,26 @@ class StudentContract:
         self.OBSERVATION_TERM_DIMS = tuple(dims[n] for n in names)
         brake = metadata.get("wheel_brake_rad_s")
         self.wheel_brake_rad_s = float(brake) if brake else None
+        # the brake's angle hold, release limit and timer (see the module doc)
+        self.wheel_brake_hold_kp, self.wheel_brake_release_ratio, self.wheel_brake_after_s, self.wheel_brake_max_forward = (
+            float(metadata[key]) if metadata.get(key) else None
+            for key in ("wheel_brake_hold_kp", "wheel_brake_release_ratio", "wheel_brake_after_s",
+                        "wheel_brake_max_forward"))
+        if self.wheel_brake_after_s is not None and self.wheel_brake_release_ratio is None:
+            raise ValueError("wheel_brake_after_s widens the wheel_brake_release_ratio limit; "
+                             "the metadata has no ratio")
+        # the legs' standstill hold (see the module doc)
+        self.leg_hold_after_s, self.leg_hold_speed, self.leg_hold_release_speed = (
+            float(metadata[key]) if metadata.get(key) else None
+            for key in ("leg_hold_after_s", "leg_hold_speed", "leg_hold_release_speed"))
+        if self.leg_hold_after_s is not None and None in (self.leg_hold_speed, self.leg_hold_release_speed):
+            raise ValueError("leg_hold_after_s needs leg_hold_speed and leg_hold_release_speed")
+        # the contact solver it was trained with (None: MuJoCo's defaults)
+        self.sim_cone = metadata.get("sim_cone") or None
+        if self.sim_cone not in (None, "pyramidal", "elliptic"):
+            raise ValueError(f"Unknown sim_cone {self.sim_cone!r}.")
+        impratio = metadata.get("sim_impratio")
+        self.sim_impratio = float(impratio) if impratio else None
         # the depth_history frame it was trained on (PIE without metadata)
         self.depth = depth_spec(metadata)
         # go2-blind's speed clock (GaitClock); without gait_ref_speed the fixed
@@ -400,6 +466,9 @@ class StudentContract:
                              if feet else None)
         # the policy was trained to march in place on a zero command when told to
         self.gait_march = metadata.get("gait_march", "0") in ("1", "true", "True")
+        # wheeled: no stepping clock under a command the wheels drive
+        vy, wz = (metadata.get(f"gait_drivable_max_{k}") for k in ("lin_vel_y", "ang_vel_z"))
+        self.gait_drivable = (float(vy), float(wz)) if vy and wz else None
         self.OBS_DIM = sum(self.OBSERVATION_TERM_DIMS)
         self.PROPRIO_HISTORY_DIM = self.OBS_DIM * PROPRIO_HISTORY_LENGTH
         self.COMMAND_LOW = np.asarray(command_low, dtype=np.float32)
@@ -417,7 +486,8 @@ class StudentContract:
         (control_step) or without a phase term."""
         if self.gait_ref_speed is None or "phase" not in self.OBSERVATION_NAMES:
             return None
-        return GaitClock(self.gait_period, self.gait_ref_speed, self.gait_foot_xy)
+        return GaitClock(self.gait_period, self.gait_ref_speed, self.gait_foot_xy,
+                         self.gait_drivable)
 
     def shape_command(self, command: Sequence[float]) -> np.ndarray:
         """Clip to the training envelope and apply the training deadzone."""
@@ -499,7 +569,8 @@ def contract_for(metadata: dict[str, str],
             and metadata.get("observation_names") in tuple(
                 ",".join(names + extra)
                 for names in (OBSERVATION_NAMES, no_phase)
-                for extra in ((), (HEADING_TERM,)))):
+                for extra in ((), (HEADING_TERM,))) + (
+                ",".join(no_phase + (HEADING_TERM, "phase")),)):
         return BlindContract(metadata)
     raise ValueError("ONNX is neither a depth-student export (metadata "
                      f"'contract' in {', '.join(STUDENT_CONTRACTS + HEADING_CONTRACTS + NAVCORE_CONTRACTS)}) "

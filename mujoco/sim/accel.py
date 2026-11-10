@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import numpy as np
 
-LINEAR = 1.0      # m/s²: a held arrow at 50% of go2-blind's range (0.75 m/s) in 0.75 s
-ANGULAR = 2.0     # rad/s²: its turn (0.75 rad/s) in 0.4 s
+LINEAR = 2.0      # m/s²: a held arrow at 50% of go2-blind's range (0.75 m/s) in 0.38 s
+ANGULAR = 3.0     # rad/s²: its turn (0.75 rad/s) in 0.25 s
 CONTROL_DT = 0.02   # s: one vector() call per control tick
 
 

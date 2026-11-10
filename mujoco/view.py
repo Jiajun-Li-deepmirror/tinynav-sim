@@ -76,9 +76,10 @@ from sim.plant import (  # noqa: E402
     reset_to_spawn,
     web_view_model,
 )
-from sim.policy import PieOnnxPolicy  # noqa: E402
+from sim.policy import PieOnnxPolicy, fallback_policy  # noqa: E402
 from sim.robots import DEFAULT_ROBOT, ROBOTS, get_robot  # noqa: E402
 from sim.runtime import DepthCamera, PieRuntime  # noqa: E402
+from sim.posture import PostureReset, hip_out_deg  # noqa: E402
 from sim.thermal import HipThermal  # noqa: E402
 
 CONTROL_DT = 0.02
@@ -197,6 +198,40 @@ def _argv_value(flag: str, default):
 _MODELS: dict[tuple[str, str], tuple] = {}
 _MESHES: dict[tuple[str, str], dict] = {}
 
+# The web panel's payload (2026-11-10): (kg, x, y, z) of a point mass on
+# base_link (base frame, m) and whether the COM markers show; every World
+# applies it (robot and map switches keep it), a slider moves it at once.
+PAYLOAD = [0.0, 0.0, 0.0, 0.0, True]
+# The web panel's floor friction: the foot / wheel geoms' sliding friction
+# (they carry contact priority 1, so theirs is what every contact uses);
+# None = the plant's 0.6 (headless and native-viewer runs).
+FRICTION: list = [None]
+# The web panel's static friction: MuJoCo's noslip solver iterations (0 = MuJoCo's soft
+# contact, whose feet creep under a steady sideways load well inside the friction cone;
+# training's mujoco_warp has no noslip). None = the plant's 0 (headless runs).
+NOSLIP_ITERATIONS = 10
+NOSLIP: list = [None]
+
+
+def apply_payload(model, base0, kg: float, x: float, y: float, z: float) -> None:
+    """base_link's mass, centre of mass and inertia with a point mass `kg` at
+    (x, y, z) (base frame), from its own values base0 = (mass, ipos, inertia),
+    as the acceptance's payload (tinynav accept_stairs) and training's
+    base_payload_point; 0 kg restores it."""
+    bid, M0, c0, I0 = base0
+    p = np.array([x, y, z], dtype=np.float64)
+    M = M0 + kg
+    c = (M0 * c0 + kg * p) / M
+    d0, dp = c0 - c, p - c
+
+    def par(d):
+        return np.array([d[1] ** 2 + d[2] ** 2, d[0] ** 2 + d[2] ** 2, d[0] ** 2 + d[1] ** 2])
+
+    model.body_mass[bid] = M
+    model.body_ipos[bid] = c
+    model.body_inertia[bid] = np.maximum(I0 + M0 * par(d0) + kg * par(dp), 1e-4)
+    mujoco.mj_setConst(model, mujoco.MjData(model))
+
 
 def _compiled(scene_name: str, robot: str):
     key = (scene_name, robot)
@@ -229,6 +264,31 @@ def robot_length(model, data, b) -> float:
     return float(hi - lo)
 
 
+class FallbackSwitch:
+    """The panel's Depth fallback checkbox: on, a navcore student hands the
+    robot to its blind policy while the depth monitor distrusts the frame
+    (sim/depth_monitor.py). It applies to the driving runtime at once and to
+    every runtime made after (robot and map switches included)."""
+
+    def __init__(self) -> None:
+        self._enabled = True
+        self.runtime = lambda: None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self._enabled = bool(value)
+        rt = self.runtime()
+        if rt is not None:
+            rt.fallback_enabled = self._enabled
+
+
+FALLBACK = FallbackSwitch()
+
+
 class World:
     """One robot in the scene: plant, policy, depth camera, runtime. The
     depth camera (EGL) is opened by start() -- after the splat pipeline's
@@ -250,6 +310,15 @@ class World:
         walls = ((self.model.geom_bodyid == 0)
                  & (self.model.geom_rgba[:, 3] < 0.5))
         self.model.geom_rgba[walls, 3] = wall_alpha
+        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
+        self._base0 = (bid, float(self.model.body_mass[bid]), self.model.body_ipos[bid].copy(),
+                       self.model.body_inertia[bid].copy()) if bid >= 0 else None
+        self.set_payload(*PAYLOAD[:4])
+        self._feet = np.flatnonzero((self.model.geom_priority > 0) & (self.model.geom_bodyid != 0))
+        if FRICTION[0] is not None:
+            self.set_friction(FRICTION[0])
+        if NOSLIP[0] is not None:
+            self.model.opt.noslip_iterations = NOSLIP[0]
         self.data = mujoco.MjData(self.model)
         start_pos, start_yaw = start if start is not None else (pos, yaw_deg)
         reset_to_spawn(self.model, self.data, self.b, settle=True,
@@ -269,6 +338,15 @@ class World:
         self.policy_path = policy_path   # a --policy override (None: the registry's)
         self.cam = None
         self.rt = None
+
+    def set_friction(self, mu: float) -> None:
+        """The feet's (wheels') sliding friction (the web panel's 地面摩擦)."""
+        self.model.geom_friction[self._feet, 0] = mu
+
+    def set_payload(self, kg: float, x: float, y: float, z: float) -> None:
+        """A point mass on base_link (the web panel's Payload; 0 kg: none)."""
+        if self._base0 is not None:
+            apply_payload(self.model, self._base0, kg, x, y, z)
 
     def ray(self, origin, direction, reach: float):
         """Distance (m) along the unit `direction` from `origin` to the first
@@ -302,18 +380,23 @@ class World:
 
     def start(self) -> None:
         self.cam = DepthCamera(self.model, self.b.depth_camera_id)
-        self.rt = PieRuntime(self.model, self.b, self.data, self.policy, self.cam,
-                             self.cmd, spawn_pos=self.pos,
-                             spawn_yaw_deg=self.yaw_deg)
+        self.rt = self._runtime(self.policy, self.kind)
+
+    def _runtime(self, policy, kind: str) -> PieRuntime:
+        """A runtime for `policy`; a perception policy gets the robot's blind
+        policy riding along as its depth fallback."""
+        rt = PieRuntime(self.model, self.b, self.data, policy, self.cam,
+                        self.cmd, spawn_pos=self.pos, spawn_yaw_deg=self.yaw_deg,
+                        fallback_policy=fallback_policy(self.robot) if kind == "perception" else None)
+        rt.fallback_enabled = FALLBACK.enabled
+        return rt
 
     def set_kind(self, kind: str) -> None:
         """Swap perception <-> blind in place (robot state kept, fresh
         policy memory and histories)."""
         policy = self._load_policy(kind, None)
         old = self.rt
-        self.rt = PieRuntime(self.model, self.b, self.data, policy, self.cam,
-                             self.cmd, spawn_pos=self.pos,
-                             spawn_yaw_deg=self.yaw_deg)
+        self.rt = self._runtime(policy, kind)
         if old is not None:
             old.close()
         self.policy, self.kind, self.policy_path = policy, kind, None
@@ -380,6 +463,7 @@ def main() -> int:
     world = World(scene_name, robot_name, kind, cmd, pos, yaw_deg,
                   policy_path=policy_path,
                   wall_alpha=wall_alpha if view_mode == "web" else 1.0)
+    FALLBACK.runtime = lambda: world.rt   # follows robot and map switches
     pad.set_envelope(*world.pad_envelope())
     kb.set_envelope(*world.pad_envelope())
     # the hips' estimated motor temperatures (panel plot), restarted per robot
@@ -442,8 +526,8 @@ def main() -> int:
     if view_mode == "web":
         try:
             import viser
-            from webpanel import (OperatorPanel, add_depth_camera, base_yaw, guard_status,
-                                  march_status, sync_depth_camera)
+            from webpanel import (OperatorPanel, add_depth_camera, base_yaw, fallback_status,
+                                  guard_status, march_status, sync_depth_camera)
             from webviewer import ViserMujocoScene
             web_server = viser.ViserServer(port=web_port)
 
@@ -454,7 +538,7 @@ def main() -> int:
             # pipeline holds the boot map's cloud)
             panel = OperatorPanel(
                 web_server, ROBOTS, world.robot.name, gamepad=pad, keyboard=kb,
-                accel=accel, guard=cmd, on_button=_on_button, scene=scene_name,
+                accel=accel, guard=cmd, fallback=FALLBACK, on_button=_on_button, scene=scene_name,
                 scenes=None if preview else {n: s.label or n for n, s in SCENES.items()})
 
             def _build_web_scene():
@@ -482,9 +566,23 @@ def main() -> int:
                 # the policy's depth camera, a small pyramid (depth policy only)
                 add_depth_camera(scene, world.length, world.depth_spec)
                 scene.show_camera_frustums = world.kind == "perception"
+                # the payload point (orange) and the whole robot's centre of
+                # mass (green), the panel's Payload / 显示质心
+                try:
+                    scene.add_body_marker("payload", "base_link", PAYLOAD[1:4], radius=0.03,
+                                          label="负载")
+                    scene.add_com_marker("com", "base_link", radius=0.025, label="COM")
+                    scene.set_marker_visible("payload", PAYLOAD[4] and PAYLOAD[0] > 0)
+                    scene.set_marker_visible("com", PAYLOAD[4])
+                except Exception as exc:      # noqa: BLE001 -- markers are optional
+                    print(f"[WEBVIEWER] payload markers: {exc}", flush=True)
                 scene.update_from_mjdata(world.data)
                 return scene
 
+            FRICTION[0] = panel.friction.value
+            world.set_friction(FRICTION[0])
+            NOSLIP[0] = NOSLIP_ITERATIONS if panel.noslip.value else 0
+            world.model.opt.noslip_iterations = NOSLIP[0]
             web_scene = _build_web_scene()
             tabs = web_scene.create_visualization_gui()
             panel.show_robot(world.robot.name, world.kind == "perception",
@@ -578,7 +676,9 @@ def main() -> int:
                     ad = MuJoCoAdapter(world.model, world.data)
             print(f"[SWITCH] map={scene_name} robot={world.robot.name} kind={world.kind} "
                   f"policy={world.policy_name} "
-                  f"contract={world.policy.contract.name}", flush=True)
+                  f"contract={world.policy.contract.name} "
+                  f"cone={mujoco.mjtCone(world.model.opt.cone).name} "
+                  f"impratio={world.model.opt.impratio:g}", flush=True)
         except Exception as exc:      # noqa: BLE001 -- keep driving the old one
             print(f"[SWITCH] {request} refused: {exc}", flush=True)
             for client in web_server.get_clients().values():
@@ -625,6 +725,10 @@ def main() -> int:
                     pass
 
     quit_req = False
+    # the real controller's posture reset (sim/posture.py), per robot
+    posture = PostureReset(world.robot.name)
+    if panel is not None:
+        panel.show_posture(posture.enabled)
     # marching in place: M / pad X-Y toggle it, Stop and Reset end it; the
     # policy marches on a zero command if it was trained to (gait_march)
     march = False
@@ -642,10 +746,32 @@ def main() -> int:
             request = panel.take_request() if panel is not None else None
             if request is not None:
                 _switch(request)
+            ns = panel.take_noslip() if panel is not None else None
+            if ns is not None:
+                NOSLIP[0] = NOSLIP_ITERATIONS if ns else 0
+                world.model.opt.noslip_iterations = NOSLIP[0]
+                print(f"[NOSLIP] {NOSLIP[0]} iterations on {world.robot.name}", flush=True)
+            mu = panel.take_friction() if panel is not None else None
+            if mu is not None:
+                FRICTION[0] = mu
+                world.set_friction(mu)
+                print(f"[FRICTION] feet {mu:.2f} on {world.robot.name}", flush=True)
+            pay = panel.take_payload() if panel is not None else None
+            if pay is not None:
+                PAYLOAD[:] = list(pay)
+                world.set_payload(*pay[:4])
+                if web_scene is not None:
+                    web_scene.set_marker_pos("payload", pay[1:4])
+                    web_scene.set_marker_visible("payload", pay[4] and pay[0] > 0)
+                    web_scene.set_marker_visible("com", pay[4])
+                print(f"[PAYLOAD] {pay[0]:.1f} kg at ({pay[1]:+.2f}, {pay[2]:+.2f}, "
+                      f"{pay[3]:+.2f}) m on {world.robot.name}: base_link "
+                      f"{world.model.body_mass[1]:.2f} kg", flush=True)
             if kb.consume_reset():
                 world.reset()
                 cmd.reset()
                 march = False
+                posture.reset()
                 print("[RESET] back to spawn", flush=True)
             if kb.consume_march() | pad.consume_march():
                 march = not march
@@ -653,12 +779,24 @@ def main() -> int:
             if (kb.consume_stop() or pad.stop_held) and march:
                 march = False
                 print("[MARCH] off (stop)", flush=True)
-            world.rt.march = march
+            if posture.robot != world.robot.name:      # a robot switch: its own setting
+                posture = PostureReset(world.robot.name)
+                if panel is not None:
+                    panel.show_posture(posture.enabled)
+            on = panel.take_posture() if panel is not None else None
+            if on is not None:
+                posture.enabled = on
+                print(f"[POSTURE] reset {'on' if on else 'off'} ({world.robot.name})", flush=True)
+            # the operator's march (M / pad X-Y) or the posture reset's, as on
+            # the robot (env->march = march || march_request)
+            world.rt.march = march or posture.marching
             world.rt.tick()
+            posture.step(world.rt)
             thermal.step(CONTROL_DT)
             if panel is not None:
-                panel.plot_temperatures(thermal.time, thermal.labels,
-                                        thermal.temperatures)
+                # the hips' angle off the default (the user 2026-11-10: instead
+                # of the estimated temperatures)
+                panel.plot_temperatures(thermal.time, *hip_out_deg(world.rt))
             next_ctrl = max(next_ctrl + CONTROL_DT, time.perf_counter())
         if now >= next_render:
             rt = world.rt
@@ -712,9 +850,15 @@ def main() -> int:
                     rt.depth_frame(),
                     f"{world.policy_name} · cmd {rt.command[0]:+.2f} "
                     f"{rt.command[1]:+.2f} {rt.command[2]:+.2f} · 手柄{pad_txt}"
-                    + march_status(march, world.policy.contract) + guard_status(cmd),
+                    + march_status(march, world.policy.contract) + guard_status(cmd)
+                    + fallback_status(rt) + posture.status(),
                     ray=world.ray)
                 web_scene.show_camera_frustums = world.kind == "perception"
+                if PAYLOAD[4]:
+                    # the COM's drop line: the first surface straight below it
+                    com = world.data.subtree_com[1]
+                    below = world.ray(com, (0.0, 0.0, -1.0), 3.0)
+                    web_scene.set_com_ground("com", None if below is None else com[2] - below)
                 web_scene.update_from_mjdata(world.data)
                 t_view = now
 

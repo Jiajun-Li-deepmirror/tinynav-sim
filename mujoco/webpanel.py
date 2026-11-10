@@ -403,7 +403,7 @@ class OperatorPanel:
                 "踏步复位", False,
                 hint="As on the robot (its config.yaml ThermalGuard posture_march_rad): 1 s into a "
                      "stop, a leg joint more than 0.15 rad off the default stance marches in place "
-                     "2 s, at most twice per stop. Starts as the robot is set (Go2-W on); policies "
+                     "1 s, at most twice per stop. Starts as the robot is set (Go2-W on); policies "
                      "that cannot march ignore it.")
             self.posture_cb.on_update(self._on_posture)
             self._posture_req: bool | None = None

@@ -29,14 +29,14 @@ from sim import contract as C
 class PostureResetCfg:
     rad: float = 0.15        # posture_march_rad
     settle_s: float = 1.0    # posture_settle_s
-    march_s: float = 2.0     # posture_march_s
+    march_s: float = 1.0     # posture_march_s (2.0 until 2026-11-10)
     max_tries: int = 2       # posture_march_max
 
 
 # = robot_ctrl deploy/robots/<robot>/config/config.yaml ThermalGuard (posture_march_rad 0 / absent: off).
 # Keep the two in step: a robot turned on there is turned on here.
 ROBOT_CONFIG: dict[str, PostureResetCfg] = {
-    "go2w": PostureResetCfg(0.15, 1.0, 2.0, 2),
+    "go2w": PostureResetCfg(0.15, 1.0, 1.0, 2),
 }
 DEFAULT_CFG = PostureResetCfg()   # what the panel's checkbox uses on a robot that has it off
 

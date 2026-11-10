@@ -28,6 +28,9 @@ bash gsplat/run_gsplat.sh                # 容器内；--map 带图导航
 
 MuJoCo 物理 + wgpu 3DGS 传感器视图：策略驱动 + HIL DDS 契约面 + viser 网页
 可视化，独立镜像（代码与 model/ 资产包烤入镜像，运行期不挂载仓库）。
+六个机型（Go2、As2、B2 和轮足 Go2-W、As2-W、B2-W）的深度学生和盲走策略与真机部署的
+同一批（`mujoco/assets/policy/`），网页面板可加负载和 COM、调地面摩擦、开静摩擦，
+并带真机控制器的防撞墙、深度异常切盲走和踏步复位。
 
 ```bash
 docker build -f docker/mujoco.Dockerfile -t mjsim:jazzy .   # 先解压 model.zip 到仓根

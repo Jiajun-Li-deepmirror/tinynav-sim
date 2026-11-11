@@ -92,10 +92,18 @@ class Robot:
     """(lo, hi) boxes in base_link (m): the web view leaves out every separate
     piece of a base_link mesh that lies inside one (parts merged into the trunk
     mesh, e.g. B2's LiDAR mount, guard posts and cover)."""
+    guard_stop_m: float | None = None
+    """Camera-to-wall distance where the wall guard stops this robot's forward
+    command (sim/guard.py); None: guard.STOP_M."""
 
     @property
     def mjcf(self) -> Path:
-        return ASSETS / self.name / f"{self.name}.xml"
+        base = ASSETS / self.name / f"{self.name}.xml"
+        if os.environ.get("TNSIM_MODEL") == "uros":   # the unitree_ros-aligned model (sim/contract.py uros())
+            aligned = base.with_name(f"{self.name}_uros.xml")
+            if aligned.is_file():
+                return aligned
+        return base
 
     def mesh_dir(self) -> Path | None:
         """Visual meshes, model/ bundle search order: $ROBOT_ASSETS, the
@@ -140,32 +148,58 @@ class Robot:
 
 
 ROBOTS: dict[str, Robot] = {
-    # Plants: go2-blind's robot models (unitree_rl_mjlab export_sim_robot.py),
-    # each driven by its heading-recipe depth student (the old models' students
-    # are not driven on them). The legged ones are the navcore students on
-    # go2-blind's legged recipe ({go2,as2,b2}_depth_v3, 2026-10-27).
+    # Plants: go2-blind's robot models (unitree_rl_mjlab export_sim_robot.py)
+    # (the old models' students are not driven on them). The legged depth
+    # students are the navcore students on go2-blind's legged recipe
+    # ({go2,as2,b2}_depth_v3, 2026-10-27) fine-tuned against things in front of
+    # the lens ({go2,as2,b2}_depth_v3_occ, 2026-10-30), then distilled again
+    # from teachers on go2-blind's feetedge blind models with stereo edge
+    # smoothing ({go2,as2,b2}_depth_v3_fe, 2026-10-31; their blind
+    # fallbacks go2_blind_v4 / as2_blind_v3 / b2_blind_v2; B2's 2026-11-02,
+    # PPO-fine-tuned against its teacher; then b2_depth_v4_n4b, 2026-11-09, from a
+    # teacher on the blind b2_blind_v3, distilled and PPO-fine-tuned, fallback
+    # b2_blind_v3), the wheeled ones the
+    # navcore students of go2-blind's wheeled finals ({go2w,b2w,as2w}_depth_v4,
+    # 2026-10-30), Go2W distilled again from a teacher on go2-blind's 10-31
+    # wheeled blind model with occlusions and stereo edge smoothing
+    # (go2w_depth_v4_fe, 2026-11-01; then go2w_depth_v5_ws, 2026-11-04, its teacher fine-tuned
+    # against rear wheels stepping on a landing and wheels on nosings; then go2w_depth_v6_w27d, 2026-11-09, from a
+    # teacher on the blind go2w_blind_v3 with the stairs speed pushed, distilled and PPO-fine-tuned, fallback
+    # go2w_blind_v3), B2W from a teacher on its 11-01 polish 9000
+    # with descents pushed (b2w_depth_v4_fe, 2026-11-02, fallback b2w_blind_v2; then b2w_depth_v5_ws, 2026-11-04,
+    # the stairs-wheels fix as Go2W's, PPO-fine-tuned against its teacher; then b2w_depth_v6_ns, 2026-11-04, its
+    # teacher fine-tuned against wheels rolling back down a step), As2-W from a teacher on
+    # its 10-31 blind, PPO-fine-tuned against it (as2w_depth_v4_fe, 2026-11-03, fallback as2w_blind_v2; then
+    # as2w_depth_v5_ns, 2026-11-04, its teacher fine-tuned against rear wheels stepping on a landing and wheels
+    # rolling back down a step, distilled, then PPO-fine-tuned against it; then as2w_depth_v6_mg4, 2026-11-10,
+    # from a teacher on the blind as2w_blind_v3, PPO-fine-tuned with a back-drift constraint and the gait clock
+    # paid 4x, fallback as2w_blind_v3).
+    # The wheeled blind ones are those finals
+    # ({go2w,b2w,as2w}_blind_v1, 2026-10-29; Go2W's 10-31 model go2w_blind_v2).
     "go2": Robot("go2", "Go2", *_GO2_CAMERA, spawn_drop=0.32,
-                 default_pose=_GO2_POSE, perception="go2_depth_v3.onnx",
-                 blind="go2_blind_v3.onnx", navcore=_GO2_NAVCORE),
+                 default_pose=_GO2_POSE, perception="go2_depth_v3_fe.onnx",
+                 blind="go2_blind_v4.onnx", navcore=_GO2_NAVCORE),
     "go2w": Robot("go2w", "Go2-W", *_GO2_CAMERA, spawn_drop=0.43,
-                  default_pose=_WHEEL_POSE, perception="go2w_depth_v2_heading.onnx",
-                  blind="go2w_blind_v0.onnx", wheeled=True, navcore=_GO2_NAVCORE),
+                  default_pose=_WHEEL_POSE, perception="go2w_depth_v6_w27d.onnx",
+                  blind="go2w_blind_v3.onnx", wheeled=True, navcore=_GO2_NAVCORE),
     "as2": Robot("as2", "AS2", (0.325, 0.0, 0.075), _CAMERA_QUAT,
                  spawn_drop=0.307, default_pose=_GO2_POSE,
-                 perception="as2_depth_v3.onnx", blind="as2_blind_v2.onnx",
+                 perception="as2_depth_v3_fe.onnx", blind="as2_blind_v3.onnx",
                  navcore=_AS2_NAVCORE),
     "as2w": Robot("as2w", "AS2-W", (0.325, 0.0, 0.075), _CAMERA_QUAT,
                   spawn_drop=0.37, default_pose=_GO2_POSE,
-                  perception="as2w_depth_v2_heading.onnx", blind="as2w_blind_v0.onnx",
+                  perception="as2w_depth_v6_mg4.onnx", blind="as2w_blind_v3.onnx",
                   wheeled=True, navcore=_AS2_NAVCORE),
     "b2": Robot("b2", "B2", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                 spawn_drop=0.53, default_pose=_B2_POSE,
-                perception="b2_depth_v3.onnx", blind="b2_blind_v1.onnx",
+                perception="b2_depth_v4_n4b.onnx", blind="b2_blind_v3.onnx",
+                # at 0.45 its student still stepped onto a 0.6 m box it was walked at
+                guard_stop_m=0.60,
                 navcore=_B2_NAVCORE, web_hidden_meshes=("unitree_ladar",),
                 web_hidden_boxes=(((0.25, -0.10, 0.08), (0.44, 0.10, 0.30)),)),
     "b2w": Robot("b2w", "B2-W", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                  spawn_drop=0.645, default_pose=_WHEEL_POSE,
-                 perception="b2w_depth_v2_heading.onnx", blind="b2w_blind_v0.onnx",
+                 perception="b2w_depth_v7_ew.onnx", blind="b2w_blind_v2.onnx",
                  wheeled=True, navcore=_B2_NAVCORE, web_hidden_meshes=("unitree_ladar",),
                  web_hidden_boxes=(((0.25, -0.10, 0.08), (0.44, 0.10, 0.30)),)),
 }

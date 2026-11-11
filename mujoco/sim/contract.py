@@ -65,6 +65,25 @@ JOINT_EFFORT_LIMIT = np.asarray(
     tuple(value for _ in range(4) for value in (23.5, 23.5, 45.0)),
     dtype=np.float64,
 )
+# TNSIM_MODEL=uros (2026-11-12, unitree_rl_mjlab doc/redesign.md): the Go2's URDF torque limits (unitree_ros
+# go2_description: hip / thigh 23.7, calf 45.43 N m), as the training's aligned model (model=uros)
+JOINT_EFFORT_LIMIT_UROS = np.asarray(
+    tuple(value for _ in range(4) for value in (23.7, 23.7, 45.43)),
+    dtype=np.float64,
+)
+
+
+def uros() -> bool:
+    """The robot models aligned with unitree_ros (assets/*_uros.xml, from unitree_rl_mjlab's
+    tools/robot_params/sync_tinynav.py), as the policies trained with model=uros."""
+    import os
+    return os.environ.get("TNSIM_MODEL") == "uros"
+
+
+def joint_effort_limit():
+    return JOINT_EFFORT_LIMIT_UROS if uros() else JOINT_EFFORT_LIMIT
+
+
 JOINT_ARMATURE = np.asarray(
     tuple(value for _ in range(4) for value in (0.01, 0.01, 0.02)),
     dtype=np.float64,

@@ -24,6 +24,7 @@ splatsense map3 scene, mirroring training exactly:
 from __future__ import annotations
 
 import copy
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -39,6 +40,16 @@ from . import contract as C  # noqa: E402
 from .robots import DEFAULT_ROBOT, Robot, get_robot  # noqa: E402
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write through a temp file and a rename. Several processes compose the
+    same scene into one workdir at once (the tinynav acceptance of two
+    training boxes); a plain write_text truncates first, and a reader in
+    between got an empty scene.xml."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _preprocess_scene(scene_path: Path, workdir: Path) -> Path:
     """MuJoCo's <include> needs a rooted document, but collision fragments
     ship as bare <geom> lists (the motrixsim parser tolerated that). Copy
@@ -48,10 +59,10 @@ def _preprocess_scene(scene_path: Path, workdir: Path) -> Path:
     text = scene_path.read_text()
     for m in re.finditer(r'<include\s+file="([^"]+)"\s*/?>', text):
         coll = scene_path.parent / m.group(1)
-        (workdir / m.group(1)).write_text(
-            "<mujoco>\n" + coll.read_text() + "\n</mujoco>\n")
+        _write_atomic(workdir / m.group(1),
+                      "<mujoco>\n" + coll.read_text() + "\n</mujoco>\n")
     fixed = workdir / scene_path.name
-    fixed.write_text(text)
+    _write_atomic(fixed, text)
     return fixed
 
 
@@ -181,19 +192,37 @@ SCENES: dict[str, Scene] = {
         default_spawn="down",
         label="map3 楼梯井",
     ),
-    # MetaCam map_2 indoor (spirula_ba_s2 step-50000, 2.98M gaussians).
-    # Spawn = the gsplat-validated low-capture-band spot (map2_go2.json
-    # initial_qpos, yaw -11.49); ground top -1.20 from the spawn-footprint
-    # gaussian histogram -- see map2_scene.xml, recalibrate ground there
-    # AND here together by render.
-    "map2": Scene(
-        xml=ASSETS / "mjcf" / "map2_scene.xml",
-        collision=None,
-        catch_z=-2.6,
-        ply="map2_scene.ply",
-        spawns={"low": ((3.21, -5.54, -0.755), -11.49)},
-        default_spawn="low",
-        label="map2 室内",
+    # The unitree_rl_mjlab training pyramid stairs (2026-11-05, in map2's
+    # place; the user: "把仿真里的map2室内场景换成金字塔楼梯地形"): mjlab's
+    # pyramid / inverted-pyramid tiles (scripts/make_pyramid_scene.py ->
+    # pyramid_collision.xml), pits y 0..8 and pyramids y 8..16, rises 0.10 /
+    # 0.14 / 0.18 m at tread 0.32 (x 0..24) and 0.18 m at tread 0.25 (x
+    # 24..32). Spawns snap to the box tops below the hint z. map2's files
+    # (map2_scene.xml, model/splat/map2_scene.ply) are kept; its old entry:
+    # Scene(xml=ASSETS/"mjcf"/"map2_scene.xml", collision=None, catch_z=-2.6,
+    # ply="map2_scene.ply", spawns={"low": ((3.21, -5.54, -0.755), -11.49)},
+    # default_spawn="low", label="map2 室内").
+    "pyramid": Scene(
+        xml=ASSETS / "mjcf" / "pyramid_scene.xml",
+        collision=ASSETS / "mjcf" / "pyramid_collision.xml",
+        catch_z=-2.5,
+        ply="",
+        spawns={
+            # in a pit's centre facing +x: climb the steps out
+            "pit_10": ((4.0, 4.0, 0.0), 0.0),
+            "pit_14": ((12.0, 4.0, 0.0), 0.0),
+            "pit_18": ((20.0, 4.0, 0.0), 0.0),
+            "pit_18_narrow": ((28.0, 4.0, 0.0), 0.0),
+            # on a pyramid's top platform facing +x: walk down
+            "top_10": ((4.0, 12.0, 3.0), 0.0),
+            "top_14": ((12.0, 12.0, 3.0), 0.0),
+            "top_18": ((20.0, 12.0, 3.0), 0.0),
+            "top_18_narrow": ((28.0, 12.0, 3.0), 0.0),
+            # on the ground west of the 0.10 m pyramid facing it: climb up
+            "ground": ((-3.0, 12.0, 0.0), 0.0),
+        },
+        default_spawn="pit_14",
+        label="金字塔楼梯",
     ),
     # flat smoke terrain: procedural ground plane + go2 (build_flat_model),
     # no walls and no catch cliff -- the emu bench's long-run scene. The
@@ -283,7 +312,7 @@ def _configure_robot_spec(spec: mujoco.MjSpec) -> None:
 
         stiffness = float(C.JOINT_STIFFNESS[index])
         damping = float(C.JOINT_DAMPING[index])
-        effort = float(C.JOINT_EFFORT_LIMIT[index])
+        effort = float(C.joint_effort_limit()[index])
         actuator = spec.add_actuator(name=joint_name, target=joint_name)
         actuator.trntype = mujoco.mjtTrn.mjTRN_JOINT
         actuator.dyntype = mujoco.mjtDyn.mjDYN_NONE
@@ -302,7 +331,8 @@ def _load_robot_spec(robot: Robot) -> mujoco.MjSpec:
     # shared decimated MSH set (model/ bundle), spliced in here. go2_pie.xml
     # also names .obj files (path + extension).
     if robot.pie_plant:
-        xml = GO2_PIE_XML.read_text()
+        pie = GO2_PIE_XML.with_name("go2_pie_uros.xml") if C.uros() else GO2_PIE_XML
+        xml = pie.read_text()
         xml = re.sub(r'file="([a-z_0-9]+)\.obj"', r'file="\1.msh"', xml)
     else:
         xml = robot.mjcf.read_text()
@@ -523,7 +553,7 @@ def _validate(model: mujoco.MjModel, b: Bindings) -> None:
     expected = (7 + C.NUM_ACTIONS, 6 + C.NUM_ACTIONS, C.NUM_ACTIONS)
     if (model.nq, model.nv, model.nu) != expected:
         raise ValueError(f"nq/nv/nu={(model.nq, model.nv, model.nu)}, want {expected}")
-    lo = np.column_stack((-C.JOINT_EFFORT_LIMIT, C.JOINT_EFFORT_LIMIT))
+    lo = np.column_stack((-C.joint_effort_limit(), C.joint_effort_limit()))
     checks = (
         np.allclose(model.actuator_gainprm[b.actuator_ids, 0], C.JOINT_STIFFNESS),
         np.allclose(model.actuator_biasprm[b.actuator_ids, 1], -C.JOINT_STIFFNESS),
@@ -660,8 +690,9 @@ def reset_to_spawn(model: mujoco.MjModel, data: mujoco.MjData, b: Bindings,
     root = b.root_qpos_adr
     drop = b.robot.spawn_drop
     sc = SCENES.get(b.scene_name, _ACTIVE)
-    if pos is None and sc.collision is None and sc.xml is not None:
-        # map2 and the like: their default spawn (a validated standing pose)
+    if pos is None and sc.xml is not None and (sc.collision is None or b.scene_name != "map3"):
+        # map2 and the like: their default spawn (a validated standing pose);
+        # the pyramid scene's too (map3 keeps SPAWN_XYZ below)
         pos, yaw_deg = sc.spawns[sc.default_spawn]
     if pos is not None:
         if sc.collision is not None:

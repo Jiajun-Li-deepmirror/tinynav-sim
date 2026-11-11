@@ -163,7 +163,8 @@ ROBOTS: dict[str, Robot] = {
     # go2w_blind_v3), B2W from a teacher on its 11-01 polish 9000
     # with descents pushed (b2w_depth_v4_fe, 2026-11-02, fallback b2w_blind_v2; then b2w_depth_v5_ws, 2026-11-04,
     # the stairs-wheels fix as Go2W's, PPO-fine-tuned against its teacher; then b2w_depth_v6_ns, 2026-11-04, its
-    # teacher fine-tuned against wheels rolling back down a step), As2-W from a teacher on
+    # teacher fine-tuned against wheels rolling back down a step; then b2w_depth_v7_ew, 2026-11-05, against the
+    # front wheels stepping on the top landing; the sim back on it 2026-11-11, as the robot), As2-W from a teacher on
     # its 10-31 blind, PPO-fine-tuned against it (as2w_depth_v4_fe, 2026-11-03, fallback as2w_blind_v2; then
     # as2w_depth_v5_ns, 2026-11-04, its teacher fine-tuned against rear wheels stepping on a landing and wheels
     # rolling back down a step, distilled, then PPO-fine-tuned against it; then as2w_depth_v6_mg4, 2026-11-10,
@@ -194,7 +195,7 @@ ROBOTS: dict[str, Robot] = {
                 web_hidden_boxes=(((0.25, -0.10, 0.08), (0.44, 0.10, 0.30)),)),
     "b2w": Robot("b2w", "B2-W", (0.445, 0.0, 0.05), _CAMERA_QUAT,
                  spawn_drop=0.645, default_pose=_WHEEL_POSE,
-                 perception="b2w_depth_v6_ns.onnx", blind="b2w_blind_v2.onnx",
+                 perception="b2w_depth_v7_ew.onnx", blind="b2w_blind_v2.onnx",
                  wheeled=True, navcore=_B2_NAVCORE, web_hidden_meshes=("unitree_ladar",),
                  web_hidden_boxes=(((0.25, -0.10, 0.08), (0.44, 0.10, 0.30)),)),
 }
